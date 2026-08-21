@@ -272,10 +272,24 @@ class WWAIExposeImage(FileMarkerMixin):
 
 
 class WWAIExposeVideo(FileMarkerMixin):
+    """Opens a video for either of ComfyUI's two video worlds.
+
+    Core consumers take a whole `VIDEO` object; Video Helper Suite has no such
+    type and works in frames plus a separate audio track — its own
+    `VHS_LoadVideo` returns `(IMAGE, frame_count, AUDIO, VHS_VIDEOINFO)`. So
+    this marker emits both shapes from one node, the way core's
+    `GetVideoComponents` splits a video, and the author wires whichever port
+    their graph speaks.
+
+    Splitting costs one decode of the file into frames. That is the same cost
+    `VHS_LoadVideo` already pays in any workflow that uses it, and ComfyUI
+    caches it per unique input.
+    """
+
     CATEGORY = INPUT_CATEGORY
     FUNCTION = "expose"
-    RETURN_TYPES = (VIDEO_TYPE,)
-    RETURN_NAMES = ("value",)
+    RETURN_TYPES = (VIDEO_TYPE, IMAGE_TYPE, AUDIO_TYPE, "FLOAT")
+    RETURN_NAMES = ("video", "images", "audio", "fps")
     DESCRIPTION = "Opens a video and marks it as an input WWAI supplies."
 
     @classmethod
@@ -290,7 +304,11 @@ class WWAIExposeVideo(FileMarkerMixin):
     def expose(self, file, name, description):
         require_marker_name(name, type(self).__name__)
         path = folder_paths.get_annotated_filepath(file)
-        return (InputImpl.VideoFromFile(path),)
+        video = InputImpl.VideoFromFile(path)
+        components = video.get_components()
+        # audio is None when the file carries no sound track — the same thing
+        # GetVideoComponents passes on, and downstream audio ports are optional.
+        return (video, components.images, components.audio, float(components.frame_rate))
 
 
 class WWAIExposeAudio(FileMarkerMixin):

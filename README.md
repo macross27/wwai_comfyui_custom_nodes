@@ -39,7 +39,7 @@ media markers and `value` on the scalar ones; WWAI rewrites exactly that key.
 | WWAI Expose Float | `FLOAT` |
 | WWAI Expose Image | `IMAGE` + `MASK` |
 | WWAI Expose Audio | `AUDIO` |
-| WWAI Expose Video | `VIDEO` |
+| WWAI Expose Video | `video`, `images`, `audio`, `fps` — see below |
 | WWAI Expose Mesh | `FILE_3D` |
 
 Outputs — category `WWAI/Expose Output`. Each is a terminal node that saves
@@ -57,11 +57,30 @@ one file.
 ComfyUI core passes a finished `VIDEO` object around — MiniMax and the other
 API video nodes emit one. [Video Helper
 Suite](https://github.com/kosinkadink/ComfyUI-VideoHelperSuite), which most
-real workflows end in, has no `VIDEO` type at all: it carries `IMAGE` frames
-plus a separate `AUDIO` track, and its `VHS_VideoCombine` encodes and saves
-them itself.
+real workflows use, has no `VIDEO` type at all. It works in `IMAGE` frames
+plus a separate `AUDIO` track at both ends:
 
-**Expose Output Video accepts either**, so it can end either kind of workflow:
+- `VHS_LoadVideo` returns `(IMAGE, frame_count, AUDIO, VHS_VIDEOINFO)`
+- `VHS_VideoCombine` takes `images` + optional `audio` + `frame_rate`
+
+**Both WWAI video markers speak both worlds**, so they can start and end
+either kind of workflow.
+
+**Expose Video** splits the file the way core's `GetVideoComponents` does, and
+you wire whichever port your graph speaks:
+
+```
+                        ┌─► video   ─► MiniMax, Create Video
+WWAI Expose Video ──────┼─► images  ─┐
+                        ├─► audio   ─┼─► anything VHS-shaped
+                        └─► fps     ─┘
+```
+
+Splitting costs one decode of the file into frames — the same cost
+`VHS_LoadVideo` already pays. ComfyUI caches it per unique input. `audio` is
+`None` when the file has no sound track.
+
+**Expose Output Video** accepts either shape:
 
 ```
 MiniMax ──────────────────────► video ─┐
@@ -80,9 +99,6 @@ metadata PNG, a silent video and an "-audio" mux, where the real result is
 whichever entry happens to be last — a third-party ordering convention WWAI
 would have to guess at. Writing the file here removes the guess.
 
-To get frames out of a finished `VIDEO`, use ComfyUI's own **Get Video
-Components**; it is kept a separate, visible step because decoding every frame
-into memory is a cost worth seeing.
 
 Every node has a **name** and **description** field. The name must not be
 blank and must be unique in the workflow — a blank one fails the run rather

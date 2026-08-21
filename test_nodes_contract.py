@@ -24,6 +24,7 @@ import tempfile
 import types
 import unittest
 from enum import Enum
+from fractions import Fraction
 
 import numpy as np
 from PIL import Image
@@ -140,6 +141,13 @@ class _File3D:
 class _VideoFromFile:
     def __init__(self, path):
         self.path = path
+
+    def get_components(self):
+        return _VideoComponents(
+            images=_Tensor(np.zeros((5, 8, 8, 3), dtype=np.float32)),
+            audio={"waveform": _Tensor(np.zeros((1, 2, 16), dtype=np.float32)), "sample_rate": 44100},
+            frame_rate=Fraction(24, 1),
+        )
 
     def save_to(self, path, format=None, codec=None):
         with open(path, "wb") as handle:
@@ -325,8 +333,14 @@ class SocketTypeTest(unittest.TestCase):
         for name in ("WWAIExposeText", "WWAIExposeInt", "WWAIExposeFloat"):
             self.assertIn("value", nodes.NODE_CLASS_MAPPINGS[name].INPUT_TYPES()["required"], name)
 
-    def test_video_sockets_are_comfyui_native_video(self):
-        self.assertEqual(nodes.WWAIExposeVideo.RETURN_TYPES, ("VIDEO",))
+    def test_video_input_serves_both_video_worlds(self):
+        # VHS_LoadVideo returns (IMAGE, frame_count, AUDIO, VHS_VIDEOINFO) --
+        # there is no VIDEO type in that world. Emitting only VIDEO would make
+        # this marker unusable as the entry point of a VHS workflow.
+        self.assertEqual(nodes.WWAIExposeVideo.RETURN_TYPES, ("VIDEO", "IMAGE", "AUDIO", "FLOAT"))
+        self.assertEqual(nodes.WWAIExposeVideo.RETURN_NAMES, ("video", "images", "audio", "fps"))
+
+    def test_video_output_accepts_a_finished_video(self):
         self.assertEqual(
             nodes.WWAIExposeOutputVideo.INPUT_TYPES()["optional"]["video"][0], "VIDEO"
         )
@@ -361,9 +375,26 @@ class InputMarkerTest(unittest.TestCase):
         self.assertEqual(image.shape, (1, 6, 8, 3))
         self.assertEqual(mask.shape, (1, 6, 8))
 
-    def test_video_marker_opens_the_file(self):
-        (video,) = nodes.WWAIExposeVideo().expose(file="clip.mp4", name="src", description="")
+    def test_video_marker_opens_the_file_and_splits_it(self):
+        video, images, audio, fps = nodes.WWAIExposeVideo().expose(
+            file="clip.mp4", name="src", description=""
+        )
         self.assertTrue(video.path.endswith("clip.mp4"))
+        self.assertEqual(images.shape, (5, 8, 8, 3))
+        self.assertEqual(audio["sample_rate"], 44100)
+        self.assertEqual(fps, 24.0)
+        self.assertIsInstance(fps, float)
+
+    def test_video_marker_round_trips_into_the_frames_output_path(self):
+        # The whole point of splitting: a VHS-shaped workflow can take the
+        # artist's video in and put a finished one back out with sound.
+        _, images, audio, fps = nodes.WWAIExposeVideo().expose(
+            file="clip.mp4", name="src", description=""
+        )
+        result = nodes.WWAIExposeOutputVideo().expose(
+            name="out", description="", images=images, audio=audio, fps=fps
+        )
+        self.assertTrue(os.path.isfile(_written(result["ui"]["wwai_result"][0])))
 
     def test_mesh_marker_keeps_the_splat_container(self):
         (payload,) = nodes.WWAIExposeMesh().expose(file="splat.ply", name="geo", description="")
