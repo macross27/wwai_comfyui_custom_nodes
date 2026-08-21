@@ -20,11 +20,12 @@ git clone https://github.com/macross27/wwai_comfyui_custom_nodes.git
 
 Restart ComfyUI. No extra Python dependencies.
 
-**Requires** a ComfyUI that ships `comfy_api.latest` (`InputImpl`, `Types`) —
-the same build that provides `Load3D`, `SaveGLB` and the native `VIDEO` type.
-On an older build the text, number and image nodes still load and the video
-and 3D nodes are skipped with a warning naming the reason; they are never
-registered in a state where they would fail at run time.
+**Requires** a ComfyUI that ships `comfy_api.latest` (`IO`, `UI`, `InputImpl`,
+`Types`) — the same build that provides `Load3D`, `SaveGLB` and the native
+`VIDEO` type. The audio input node additionally needs `torchaudio`, the same
+dependency ComfyUI's own Load Audio node has. On a build missing either, the
+affected nodes are skipped with a warning naming the reason and the rest still
+load; nothing is ever registered in a state where it would fail at run time.
 
 ## Nodes
 
@@ -37,6 +38,7 @@ media markers and `value` on the scalar ones; WWAI rewrites exactly that key.
 | WWAI Expose Int | `INT` |
 | WWAI Expose Float | `FLOAT` |
 | WWAI Expose Image | `IMAGE` + `MASK` |
+| WWAI Expose Audio | `AUDIO` |
 | WWAI Expose Video | `VIDEO` |
 | WWAI Expose Mesh | `FILE_3D` |
 
@@ -46,8 +48,41 @@ one file.
 | Node | Accepts | Writes |
 |---|---|---|
 | WWAI Expose Output Image | `IMAGE` | `.png` |
-| WWAI Expose Output Video | `VIDEO` | `.mp4` |
+| WWAI Expose Output Audio | `AUDIO` | `.flac`, `.mp3` or `.opus` |
+| WWAI Expose Output Video | `video`, **or** `images` + `audio` + `fps` | `.mp4` |
 | WWAI Expose Output Mesh | `MESH` or any of ComfyUI's 13 `FILE_3D_*` types | `.glb` from geometry; the source file copied verbatim otherwise |
+
+### The two video worlds
+
+ComfyUI core passes a finished `VIDEO` object around — MiniMax and the other
+API video nodes emit one. [Video Helper
+Suite](https://github.com/kosinkadink/ComfyUI-VideoHelperSuite), which most
+real workflows end in, has no `VIDEO` type at all: it carries `IMAGE` frames
+plus a separate `AUDIO` track, and its `VHS_VideoCombine` encodes and saves
+them itself.
+
+**Expose Output Video accepts either**, so it can end either kind of workflow:
+
+```
+MiniMax ──────────────────────► video ─┐
+                                       ├─► WWAI Expose Output Video ─► .mp4
+VAE Decode ──► images ─┐               │
+Expose Audio ──► audio ─┴─► fps ───────┘
+```
+
+Connect **either** `video` **or** `images`, never both. `audio` applies only
+to the frames path — a finished video already carries its own sound, so
+passing both is refused rather than silently dropped or re-encoded.
+
+On the frames path this node **replaces** `VHS_VideoCombine`, rather than
+sitting after it. Video Combine returns a `VHS_FILENAMES` list holding a
+metadata PNG, a silent video and an "-audio" mux, where the real result is
+whichever entry happens to be last — a third-party ordering convention WWAI
+would have to guess at. Writing the file here removes the guess.
+
+To get frames out of a finished `VIDEO`, use ComfyUI's own **Get Video
+Components**; it is kept a separate, visible step because decoding every frame
+into memory is a cost worth seeing.
 
 Every node has a **name** and **description** field. The name must not be
 blank and must be unique in the workflow — a blank one fails the run rather

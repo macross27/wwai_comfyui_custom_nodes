@@ -22,6 +22,7 @@ these.
 import json
 import logging
 import os
+from fractions import Fraction
 
 import folder_paths
 import numpy as np
@@ -30,6 +31,7 @@ from PIL import Image, ImageOps
 from PIL.PngImagePlugin import PngInfo
 
 from .wwai_markers_core import (
+    MarkerContractError,
     copy_file_verbatim,
     extension_of,
     require_marker_name,
@@ -43,12 +45,22 @@ logger = logging.getLogger(__name__)
 # nodes — with a warning naming exactly what is missing, never a quiet
 # degrade to a wildcard socket.
 try:
-    from comfy_api.latest import InputImpl, Types
+    from comfy_api.latest import IO, UI, InputImpl, Types
 
     MEDIA_PAYLOADS_IMPORT_ERROR = None
 except ImportError as exc:  # pragma: no cover - depends on the ComfyUI host
-    InputImpl = Types = None
+    IO = UI = InputImpl = Types = None
     MEDIA_PAYLOADS_IMPORT_ERROR = exc
+
+# Only the audio INPUT marker decodes a file itself; everything else about
+# audio goes through ComfyUI's own encoder.
+try:
+    import torchaudio
+
+    AUDIO_LOADER_IMPORT_ERROR = None
+except ImportError as exc:  # pragma: no cover - depends on the ComfyUI host
+    torchaudio = None
+    AUDIO_LOADER_IMPORT_ERROR = exc
 
 # ComfyUI's own GLB writer. Reusing it is deliberate: hand-rolling a glTF
 # serializer here would duplicate several hundred lines of UV/vertex-colour/
@@ -70,6 +82,7 @@ except ImportError as exc:  # pragma: no cover - depends on the ComfyUI host
 # producers.
 
 IMAGE_TYPE = "IMAGE"
+AUDIO_TYPE = "AUDIO"
 VIDEO_TYPE = "VIDEO"
 FILE_3D_TYPE = "FILE_3D"
 MESH_OUTPUT_TYPE = ",".join(
@@ -280,6 +293,29 @@ class WWAIExposeVideo(FileMarkerMixin):
         return (InputImpl.VideoFromFile(path),)
 
 
+class WWAIExposeAudio(FileMarkerMixin):
+    CATEGORY = INPUT_CATEGORY
+    FUNCTION = "expose"
+    RETURN_TYPES = (AUDIO_TYPE,)
+    RETURN_NAMES = ("value",)
+    DESCRIPTION = "Opens an audio file and marks it as an input WWAI supplies."
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "file": (input_root_files(content_types=["audio", "video"]), {"audio_upload": True}),
+                **metadata_widgets(),
+            }
+        }
+
+    def expose(self, file, name, description):
+        require_marker_name(name, type(self).__name__)
+        path = folder_paths.get_annotated_filepath(file)
+        waveform, sample_rate = torchaudio.load(path)
+        return ({"waveform": waveform.unsqueeze(0), "sample_rate": sample_rate},)
+
+
 class WWAIExposeMesh(FileMarkerMixin):
     CATEGORY = INPUT_CATEGORY
     FUNCTION = "expose"
@@ -337,23 +373,94 @@ class WWAIExposeOutputImage:
 
 
 class WWAIExposeOutputVideo:
+    """Saves the finished video, from either of ComfyUI's two video worlds.
+
+    ComfyUI core passes a finished VIDEO object around (MiniMax and every other
+    API video node emit one). Video Helper Suite — which most real workflows
+    end in — has no VIDEO type at all: it carries IMAGE frames plus a separate
+    AUDIO track, and its own VHS_VideoCombine both encodes and saves them.
+
+    Accepting both is what lets this marker sit at the end of either kind of
+    workflow. On the frames path it replaces VHS_VideoCombine outright rather
+    than reading its VHS_FILENAMES list, which is a third-party structure whose
+    "the real video is the last entry" ordering WWAI would have to guess at.
+    """
+
     CATEGORY = OUTPUT_CATEGORY
     FUNCTION = "expose"
     RETURN_TYPES = ()
     OUTPUT_NODE = True
-    DESCRIPTION = "Saves the finished video and marks it as WWAI's result."
+    DESCRIPTION = "Saves the finished video (or frames + audio) and marks it as WWAI's result."
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {"value": (VIDEO_TYPE,), **metadata_widgets()}}
+        return {
+            "required": metadata_widgets(),
+            "optional": {
+                "video": (VIDEO_TYPE, {"tooltip": "A finished video, e.g. from MiniMax or Create Video."}),
+                "images": (IMAGE_TYPE, {"tooltip": "Frames to encode, e.g. what Video Combine takes."}),
+                "audio": (AUDIO_TYPE, {"tooltip": "Sound track. Only used with frames."}),
+                "fps": ("FLOAT", {"default": 30.0, "min": 1.0, "max": 120.0, "step": 1.0}),
+            },
+        }
 
-    def expose(self, value, name, description):
+    def expose(self, name, description, video=None, images=None, audio=None, fps=30.0):
         class_name = type(self).__name__
         require_marker_name(name, class_name)
+
+        if (video is None) == (images is None):
+            raise MarkerContractError(
+                f"{class_name}: connect EITHER 'video' (a finished video) OR "
+                f"'images' (frames to encode) — not both, and not neither."
+            )
+
+        if video is None:
+            video = InputImpl.VideoFromComponents(
+                Types.VideoComponents(images=images, audio=audio, frame_rate=Fraction(fps))
+            )
+        elif audio is not None:
+            # Muxing a separate track into a finished video means decoding and
+            # re-encoding it. Refuse rather than quietly dropping the audio or
+            # quietly degrading the video.
+            raise MarkerContractError(
+                f"{class_name}: 'audio' cannot be combined with a finished "
+                f"'video' — a video already carries its own sound. Connect "
+                f"frames to 'images' instead, or mux upstream."
+            )
+
         container = Types.VideoContainer.AUTO
         path, entry = save_path(class_name, name, Types.VideoContainer.get_extension(container))
-        value.save_to(path, format=container, codec=Types.VideoCodec.AUTO)
+        video.save_to(path, format=container, codec=Types.VideoCodec.AUTO)
         return wwai_result(entry)
+
+
+class WWAIExposeOutputAudio:
+    CATEGORY = OUTPUT_CATEGORY
+    FUNCTION = "expose"
+    RETURN_TYPES = ()
+    OUTPUT_NODE = True
+    DESCRIPTION = "Saves the finished audio and marks it as WWAI's result."
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "value": (AUDIO_TYPE,),
+                "format": (["flac", "mp3", "opus"], {"default": "flac"}),
+                **metadata_widgets(),
+            }
+        }
+
+    def expose(self, value, format, name, description):
+        class_name = type(self).__name__
+        require_marker_name(name, class_name)
+        # ComfyUI's own encoder, so container and codec handling stay identical
+        # to what its Save Audio nodes produce.
+        results = UI.AudioSaveHelper.save_audio(
+            value, FILENAME_PREFIX, IO.FolderType.output, cls=None, format=format
+        )
+        entry = require_single(results, class_name, "audio file")
+        return wwai_result(dict(entry))
 
 
 class WWAIExposeOutputMesh:
@@ -441,6 +548,7 @@ if MEDIA_PAYLOADS_IMPORT_ERROR is None:
             "WWAIExposeVideo": WWAIExposeVideo,
             "WWAIExposeMesh": WWAIExposeMesh,
             "WWAIExposeOutputVideo": WWAIExposeOutputVideo,
+            "WWAIExposeOutputAudio": WWAIExposeOutputAudio,
             "WWAIExposeOutputMesh": WWAIExposeOutputMesh,
         }
     )
@@ -449,13 +557,25 @@ if MEDIA_PAYLOADS_IMPORT_ERROR is None:
             "WWAIExposeVideo": "WWAI Expose Video",
             "WWAIExposeMesh": "WWAI Expose Mesh",
             "WWAIExposeOutputVideo": "WWAI Expose Output Video",
+            "WWAIExposeOutputAudio": "WWAI Expose Output Audio",
             "WWAIExposeOutputMesh": "WWAI Expose Output Mesh",
         }
     )
 else:
     logger.warning(
-        "WWAI markers: the video and 3D nodes are unavailable because "
-        "comfy_api.latest could not be imported (%s). Update ComfyUI to a "
-        "build that ships comfy_api.latest (InputImpl, Types).",
+        "WWAI markers: the video, audio-output and 3D nodes are unavailable "
+        "because comfy_api.latest could not be imported (%s). Update ComfyUI "
+        "to a build that ships comfy_api.latest (IO, UI, InputImpl, Types).",
         MEDIA_PAYLOADS_IMPORT_ERROR,
+    )
+
+if AUDIO_LOADER_IMPORT_ERROR is None:
+    NODE_CLASS_MAPPINGS["WWAIExposeAudio"] = WWAIExposeAudio
+    NODE_DISPLAY_NAME_MAPPINGS["WWAIExposeAudio"] = "WWAI Expose Audio"
+else:
+    logger.warning(
+        "WWAI markers: the audio input node is unavailable because torchaudio "
+        "could not be imported (%s) — the same dependency ComfyUI's own Load "
+        "Audio node needs.",
+        AUDIO_LOADER_IMPORT_ERROR,
     )

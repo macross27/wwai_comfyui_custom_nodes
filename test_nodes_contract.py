@@ -86,6 +86,17 @@ def _folder_paths_stub():
     mod.get_input_directory = lambda: _IN
     mod.get_output_directory = lambda: _OUT
     mod.filter_files_content_types = filter_files_content_types
+    def filter_files_content_types_with_audio(files, content_types):
+        exts = ()
+        if "image" in content_types:
+            exts += image_ext
+        if "video" in content_types:
+            exts += video_ext
+        if "audio" in content_types:
+            exts += (".flac", ".mp3", ".wav", ".opus")
+        return [f for f in files if f.lower().endswith(exts)]
+
+    mod.filter_files_content_types = filter_files_content_types_with_audio
     mod.get_annotated_filepath = lambda name: os.path.join(_IN, name)
     mod.exists_annotated_filepath = lambda name: os.path.isfile(os.path.join(_IN, name))
     mod.get_save_image_path = get_save_image_path
@@ -136,15 +147,60 @@ class _VideoFromFile:
         return path
 
 
+class _VideoComponents:
+    def __init__(self, images, audio, frame_rate):
+        self.images = images
+        self.audio = audio
+        self.frame_rate = frame_rate
+
+
+class _VideoFromComponents(_VideoFromFile):
+    def __init__(self, components, bit_depth=8):
+        self.components = components
+        self.path = None
+
+
+class _FolderType(str, Enum):
+    output = "output"
+
+
+class _AudioSaveHelper:
+    """Mirrors comfy_api/latest/_ui.py:260 — one saved file per batch item."""
+
+    @staticmethod
+    def save_audio(audio, filename_prefix, folder_type, cls=None, format="flac", quality="128k"):
+        subfolder = os.path.dirname(filename_prefix)
+        full = os.path.join(_OUT, subfolder)
+        os.makedirs(full, exist_ok=True)
+        results = []
+        for index in range(audio["waveform"].shape[0]):
+            file = f"{os.path.basename(filename_prefix)}_{index:05}.{format}"
+            with open(os.path.join(full, file), "wb") as handle:
+                handle.write(b"fLaC-bytes")
+            results.append({"filename": file, "subfolder": subfolder, "type": folder_type.value})
+        return results
+
+
 def _comfy_api_stub():
     latest = types.ModuleType("comfy_api.latest")
     latest.Types = type("Types", (), {
         "File3D": _File3D, "VideoCodec": _VideoCodec, "VideoContainer": _VideoContainer,
+        "VideoComponents": _VideoComponents,
     })
-    latest.InputImpl = type("InputImpl", (), {"VideoFromFile": _VideoFromFile})
+    latest.InputImpl = type("InputImpl", (), {
+        "VideoFromFile": _VideoFromFile, "VideoFromComponents": _VideoFromComponents,
+    })
+    latest.IO = type("IO", (), {"FolderType": _FolderType})
+    latest.UI = type("UI", (), {"AudioSaveHelper": _AudioSaveHelper})
     parent = types.ModuleType("comfy_api")
     parent.latest = latest
     return parent, latest
+
+
+def _torchaudio_stub():
+    mod = types.ModuleType("torchaudio")
+    mod.load = lambda path: (_Tensor(np.zeros((2, 16), dtype=np.float32)), 44100)
+    return mod
 
 
 def _save_3d_stub():
@@ -174,6 +230,7 @@ def setUpModule():
     comfy_extras, save_3d = _save_3d_stub()
     stubs = {
         "torch": _torch_stub(),
+        "torchaudio": _torchaudio_stub(),
         "folder_paths": _folder_paths_stub(),
         "comfy_api": comfy_api,
         "comfy_api.latest": comfy_api_latest,
@@ -196,6 +253,8 @@ def setUpModule():
     Image.new("RGBA", (8, 6), (10, 20, 30, 255)).save(os.path.join(_IN, "shot.png"))
     with open(os.path.join(_IN, "clip.mp4"), "wb") as handle:
         handle.write(b"fake")
+    with open(os.path.join(_IN, "track.flac"), "wb") as handle:
+        handle.write(b"fLaC")
     with open(os.path.join(_IN, "splat.ply"), "wb") as handle:
         handle.write(_splat_ply())
 
@@ -224,10 +283,18 @@ def _written(entry):
 
 ALL_NODES = {
     "WWAIExposeText", "WWAIExposeInt", "WWAIExposeFloat", "WWAIExposeImage",
-    "WWAIExposeVideo", "WWAIExposeMesh", "WWAIExposeOutputImage",
+    "WWAIExposeAudio", "WWAIExposeVideo", "WWAIExposeMesh",
+    "WWAIExposeOutputImage", "WWAIExposeOutputAudio",
     "WWAIExposeOutputVideo", "WWAIExposeOutputMesh",
 }
-OUTPUT_NODES = {"WWAIExposeOutputImage", "WWAIExposeOutputVideo", "WWAIExposeOutputMesh"}
+OUTPUT_NODES = {
+    "WWAIExposeOutputImage", "WWAIExposeOutputAudio",
+    "WWAIExposeOutputVideo", "WWAIExposeOutputMesh",
+}
+
+
+def _audio(channels=2, batch=1):
+    return {"waveform": _Tensor(np.zeros((batch, channels, 16), dtype=np.float32)), "sample_rate": 44100}
 
 
 class RegistrationTest(unittest.TestCase):
@@ -253,7 +320,7 @@ class RegistrationTest(unittest.TestCase):
 
 class SocketTypeTest(unittest.TestCase):
     def test_the_input_key_table_wwai_rewrites_against(self):
-        for name in ("WWAIExposeImage", "WWAIExposeVideo", "WWAIExposeMesh"):
+        for name in ("WWAIExposeImage", "WWAIExposeAudio", "WWAIExposeVideo", "WWAIExposeMesh"):
             self.assertIn("file", nodes.NODE_CLASS_MAPPINGS[name].INPUT_TYPES()["required"], name)
         for name in ("WWAIExposeText", "WWAIExposeInt", "WWAIExposeFloat"):
             self.assertIn("value", nodes.NODE_CLASS_MAPPINGS[name].INPUT_TYPES()["required"], name)
@@ -261,8 +328,20 @@ class SocketTypeTest(unittest.TestCase):
     def test_video_sockets_are_comfyui_native_video(self):
         self.assertEqual(nodes.WWAIExposeVideo.RETURN_TYPES, ("VIDEO",))
         self.assertEqual(
-            nodes.WWAIExposeOutputVideo.INPUT_TYPES()["required"]["value"][0], "VIDEO"
+            nodes.WWAIExposeOutputVideo.INPUT_TYPES()["optional"]["video"][0], "VIDEO"
         )
+
+    def test_video_output_also_serves_the_video_helper_suite_world(self):
+        # VHS has no VIDEO type: it carries IMAGE frames plus a separate AUDIO
+        # track. Without these ports this marker cannot end a VHS workflow.
+        optional = nodes.WWAIExposeOutputVideo.INPUT_TYPES()["optional"]
+        self.assertEqual(optional["images"][0], "IMAGE")
+        self.assertEqual(optional["audio"][0], "AUDIO")
+        self.assertEqual(optional["fps"][1]["default"], 30.0)
+
+    def test_audio_sockets_are_comfyui_native_audio(self):
+        self.assertEqual(nodes.WWAIExposeAudio.RETURN_TYPES, ("AUDIO",))
+        self.assertEqual(nodes.WWAIExposeOutputAudio.INPUT_TYPES()["required"]["value"][0], "AUDIO")
 
     def test_mesh_input_emits_what_load3d_emits(self):
         self.assertEqual(nodes.WWAIExposeMesh.RETURN_TYPES, ("FILE_3D",))
@@ -298,12 +377,18 @@ class InputMarkerTest(unittest.TestCase):
         self.assertIs(nodes.WWAIExposeImage.VALIDATE_INPUTS(late, "n", ""), True)
         self.assertIn("not found", nodes.WWAIExposeImage.VALIDATE_INPUTS("nope.png", "n", ""))
 
+    def test_audio_marker_loads_a_waveform(self):
+        (payload,) = nodes.WWAIExposeAudio().expose(file="track.flac", name="bgm", description="")
+        self.assertEqual(payload["sample_rate"], 44100)
+        self.assertEqual(payload["waveform"].shape, (1, 2, 16))
+
     def test_every_input_marker_refuses_a_blank_name(self):
         cases = [
             ("WWAIExposeText", {"value": "hi"}),
             ("WWAIExposeInt", {"value": 1}),
             ("WWAIExposeFloat", {"value": 1.0}),
             ("WWAIExposeImage", {"file": "shot.png"}),
+            ("WWAIExposeAudio", {"file": "track.flac"}),
             ("WWAIExposeVideo", {"file": "clip.mp4"}),
             ("WWAIExposeMesh", {"file": "splat.ply"}),
         ]
@@ -334,12 +419,58 @@ class OutputMarkerTest(unittest.TestCase):
             )
         self.assertIn("got 2", str(caught.exception))
 
-    def test_video_marker_writes_and_reports_an_mp4(self):
+    def test_video_marker_writes_and_reports_an_mp4_from_a_finished_video(self):
         video = _VideoFromFile(os.path.join(_IN, "clip.mp4"))
-        result = nodes.WWAIExposeOutputVideo().expose(value=video, name="out", description="")
+        result = nodes.WWAIExposeOutputVideo().expose(name="out", description="", video=video)
         entry = result["ui"]["wwai_result"][0]
         self.assertTrue(entry["filename"].endswith(".mp4"))
         self.assertTrue(os.path.isfile(_written(entry)))
+
+    def test_video_marker_encodes_frames_plus_audio_like_video_combine(self):
+        frames = _Tensor(np.zeros((4, 8, 8, 3), dtype=np.float32))
+        result = nodes.WWAIExposeOutputVideo().expose(
+            name="out", description="", images=frames, audio=_audio(), fps=24.0
+        )
+        entry = result["ui"]["wwai_result"][0]
+        self.assertTrue(entry["filename"].endswith(".mp4"))
+        self.assertTrue(os.path.isfile(_written(entry)))
+
+    def test_video_marker_refuses_both_or_neither_source(self):
+        video = _VideoFromFile(os.path.join(_IN, "clip.mp4"))
+        frames = _Tensor(np.zeros((2, 8, 8, 3), dtype=np.float32))
+        with self.assertRaises(MarkerContractError):
+            nodes.WWAIExposeOutputVideo().expose(name="o", description="")
+        with self.assertRaises(MarkerContractError):
+            nodes.WWAIExposeOutputVideo().expose(
+                name="o", description="", video=video, images=frames
+            )
+
+    def test_video_marker_refuses_audio_alongside_a_finished_video(self):
+        # Muxing would mean decode + re-encode; dropping it would lose the
+        # artist's audio silently. Neither is acceptable, so it refuses.
+        video = _VideoFromFile(os.path.join(_IN, "clip.mp4"))
+        with self.assertRaises(MarkerContractError) as caught:
+            nodes.WWAIExposeOutputVideo().expose(
+                name="o", description="", video=video, audio=_audio()
+            )
+        self.assertIn("already carries its own sound", str(caught.exception))
+
+    def test_audio_marker_writes_and_reports_one_file(self):
+        result = nodes.WWAIExposeOutputAudio().expose(
+            value=_audio(), format="flac", name="track", description=""
+        )
+        entries = result["ui"]["wwai_result"]
+        self.assertEqual(len(entries), 1)
+        self.assertTrue(entries[0]["filename"].endswith(".flac"))
+        self.assertEqual(entries[0]["type"], "output")
+        self.assertTrue(os.path.isfile(_written(entries[0])))
+
+    def test_audio_marker_refuses_a_batch(self):
+        with self.assertRaises(MarkerContractError) as caught:
+            nodes.WWAIExposeOutputAudio().expose(
+                value=_audio(batch=3), format="flac", name="track", description=""
+            )
+        self.assertIn("got 3", str(caught.exception))
 
     def test_mesh_marker_copies_a_splat_ply_byte_for_byte(self):
         source = os.path.join(_IN, "splat.ply")
@@ -360,7 +491,8 @@ class OutputMarkerTest(unittest.TestCase):
         arr = _Tensor(np.zeros((1, 2, 2, 3), dtype=np.float32))
         cases = [
             ("WWAIExposeOutputImage", {"value": arr}),
-            ("WWAIExposeOutputVideo", {"value": _VideoFromFile(os.path.join(_IN, "clip.mp4"))}),
+            ("WWAIExposeOutputAudio", {"value": _audio(), "format": "flac"}),
+            ("WWAIExposeOutputVideo", {"video": _VideoFromFile(os.path.join(_IN, "clip.mp4"))}),
             ("WWAIExposeOutputMesh", {"value": _File3D(os.path.join(_IN, "splat.ply"))}),
         ]
         for name, kwargs in cases:
