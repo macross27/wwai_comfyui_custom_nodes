@@ -100,6 +100,24 @@ whichever entry happens to be last — a third-party ordering convention WWAI
 would have to guess at. Writing the file here removes the guess.
 
 
+### Leaving an optional reference empty
+
+Every file-based input marker (**Expose Image**, **Expose Audio**, **Expose
+Video**, **Expose Mesh**) lists `None` as the first choice on its `file`
+dropdown — a fresh node defaults to it. Picking `None` skips the file entirely
+instead of failing validation: the node returns `None` on every output
+(`fps` returns `0.0` on Expose Video, since it is a plain number) rather than
+a real payload.
+
+This is what lets one workflow wire the *full* set of optional reference
+slots a downstream node exposes (e.g. MiniMax H3 Reference to Video's up to 9
+image / 3 video / 3 audio references) and skip whichever ones a given run has
+no data for, just by leaving those markers on `None` — no rewiring, no
+deleting nodes from the exported API JSON. It only works because the
+downstream socket is declared optional and its node checks for `None`;
+connecting a marker left on `None` into a *required* input still fails, as it
+always did.
+
 Every node has a **name** and **description** field. The name must not be
 blank and must be unique in the workflow — a blank one fails the run rather
 than reaching WWAI as an unnamed parameter. Leave both as widgets; converting

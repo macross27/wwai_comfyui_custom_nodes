@@ -413,6 +413,50 @@ class InputMarkerTest(unittest.TestCase):
         self.assertEqual(payload["sample_rate"], 44100)
         self.assertEqual(payload["waveform"].shape, (1, 2, 16))
 
+    def test_no_file_is_the_default_and_first_choice(self):
+        for name in ("WWAIExposeImage", "WWAIExposeAudio", "WWAIExposeVideo", "WWAIExposeMesh"):
+            options = nodes.NODE_CLASS_MAPPINGS[name].INPUT_TYPES()["required"]["file"][0]
+            self.assertEqual(options[0], nodes.NO_FILE, name)
+
+    def test_image_marker_leaves_the_reference_empty_when_no_file_is_chosen(self):
+        self.assertEqual(
+            nodes.WWAIExposeImage().expose(file=nodes.NO_FILE, name="ref", description=""),
+            (None, None),
+        )
+
+    def test_video_marker_leaves_the_reference_empty_when_no_file_is_chosen(self):
+        self.assertEqual(
+            nodes.WWAIExposeVideo().expose(file=nodes.NO_FILE, name="src", description=""),
+            (None, None, None, 0.0),
+        )
+
+    def test_audio_marker_leaves_the_reference_empty_when_no_file_is_chosen(self):
+        self.assertEqual(
+            nodes.WWAIExposeAudio().expose(file=nodes.NO_FILE, name="bgm", description=""),
+            (None,),
+        )
+
+    def test_mesh_marker_leaves_the_reference_empty_when_no_file_is_chosen(self):
+        self.assertEqual(
+            nodes.WWAIExposeMesh().expose(file=nodes.NO_FILE, name="geo", description=""),
+            (None,),
+        )
+
+    def test_no_file_still_requires_a_marker_name(self):
+        for name, kwargs in (
+            ("WWAIExposeImage", {}),
+            ("WWAIExposeAudio", {}),
+            ("WWAIExposeVideo", {}),
+            ("WWAIExposeMesh", {}),
+        ):
+            with self.assertRaises(MarkerContractError, msg=name):
+                nodes.NODE_CLASS_MAPPINGS[name]().expose(file=nodes.NO_FILE, name="  ", description="", **kwargs)
+
+    def test_no_file_passes_validation_without_touching_disk(self):
+        for name in ("WWAIExposeImage", "WWAIExposeAudio", "WWAIExposeVideo", "WWAIExposeMesh"):
+            self.assertIs(nodes.NODE_CLASS_MAPPINGS[name].VALIDATE_INPUTS(nodes.NO_FILE, "n", ""), True, name)
+            self.assertIs(nodes.NODE_CLASS_MAPPINGS[name].VALIDATE_INPUTS("", "n", ""), True, name)
+
     def test_every_input_marker_refuses_a_blank_name(self):
         cases = [
             ("WWAIExposeText", {"value": "hi"}),

@@ -113,6 +113,17 @@ FILENAME_PREFIX = "wwai/WWAI"
 INPUT_CATEGORY = "WWAI/Expose"
 OUTPUT_CATEGORY = "WWAI/Expose Output"
 
+# Sentinel choice on every file-based input marker's dropdown that means "this
+# optional reference has no data for this run." It is always the first entry
+# (so a freshly dropped node defaults to skipped, not to an arbitrary real
+# file), and the marker's own extension/content-type filtering means no real
+# upload can ever collide with it.
+NO_FILE = "None"
+
+
+def _is_no_file(file):
+    return not file or file == NO_FILE
+
 
 def metadata_widgets():
     """The two widgets every marker carries, in one place.
@@ -143,7 +154,10 @@ def input_root_files(content_types=None, extensions=None):
         names = folder_paths.filter_files_content_types(names, content_types)
     if extensions is not None:
         names = [f for f in names if f.lower().endswith(extensions)]
-    return sorted(names)
+    # NO_FILE goes first: it is the "skip this optional reference" choice, and
+    # a freshly dropped node should default to skipped, not to some arbitrary
+    # real file that happens to sort first.
+    return [NO_FILE] + sorted(f for f in names if f != NO_FILE)
 
 
 def save_path(class_name, name, extension):
@@ -175,11 +189,15 @@ class FileMarkerMixin:
 
     @classmethod
     def IS_CHANGED(cls, file, name, description):
+        if _is_no_file(file):
+            return NO_FILE
         path = folder_paths.get_annotated_filepath(file)
         return os.path.getmtime(path), os.path.getsize(path)
 
     @classmethod
     def VALIDATE_INPUTS(cls, file, name, description):
+        if _is_no_file(file):
+            return True
         if not folder_paths.exists_annotated_filepath(file):
             return f"{cls.__name__}: input file not found: {file}"
         return True
@@ -246,7 +264,11 @@ class WWAIExposeImage(FileMarkerMixin):
     FUNCTION = "expose"
     RETURN_TYPES = (IMAGE_TYPE, "MASK")
     RETURN_NAMES = ("value", "mask")
-    DESCRIPTION = "Opens an image and marks it as an input WWAI supplies."
+    DESCRIPTION = (
+        "Opens an image and marks it as an input WWAI supplies. Leave the "
+        f"file as \"{NO_FILE}\" to skip this reference for a run — the node "
+        "outputs None and any optional downstream input it feeds is ignored."
+    )
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -259,6 +281,8 @@ class WWAIExposeImage(FileMarkerMixin):
 
     def expose(self, file, name, description):
         require_marker_name(name, type(self).__name__)
+        if _is_no_file(file):
+            return (None, None)
         path = folder_paths.get_annotated_filepath(file)
         img = ImageOps.exif_transpose(Image.open(path))
         rgb = np.array(img.convert("RGB")).astype(np.float32) / 255.0
@@ -290,7 +314,12 @@ class WWAIExposeVideo(FileMarkerMixin):
     FUNCTION = "expose"
     RETURN_TYPES = (VIDEO_TYPE, IMAGE_TYPE, AUDIO_TYPE, "FLOAT")
     RETURN_NAMES = ("video", "images", "audio", "fps")
-    DESCRIPTION = "Opens a video and marks it as an input WWAI supplies."
+    DESCRIPTION = (
+        "Opens a video and marks it as an input WWAI supplies. Leave the "
+        f"file as \"{NO_FILE}\" to skip this reference for a run — every "
+        "output is None (fps is 0.0) and any optional downstream input it "
+        "feeds is ignored."
+    )
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -303,6 +332,8 @@ class WWAIExposeVideo(FileMarkerMixin):
 
     def expose(self, file, name, description):
         require_marker_name(name, type(self).__name__)
+        if _is_no_file(file):
+            return (None, None, None, 0.0)
         path = folder_paths.get_annotated_filepath(file)
         video = InputImpl.VideoFromFile(path)
         components = video.get_components()
@@ -316,7 +347,12 @@ class WWAIExposeAudio(FileMarkerMixin):
     FUNCTION = "expose"
     RETURN_TYPES = (AUDIO_TYPE,)
     RETURN_NAMES = ("value",)
-    DESCRIPTION = "Opens an audio file and marks it as an input WWAI supplies."
+    DESCRIPTION = (
+        "Opens an audio file and marks it as an input WWAI supplies. Leave "
+        f"the file as \"{NO_FILE}\" to skip this reference for a run — the "
+        "node outputs None and any optional downstream input it feeds is "
+        "ignored."
+    )
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -329,6 +365,8 @@ class WWAIExposeAudio(FileMarkerMixin):
 
     def expose(self, file, name, description):
         require_marker_name(name, type(self).__name__)
+        if _is_no_file(file):
+            return (None,)
         path = folder_paths.get_annotated_filepath(file)
         waveform, sample_rate = torchaudio.load(path)
         return ({"waveform": waveform.unsqueeze(0), "sample_rate": sample_rate},)
@@ -339,7 +377,11 @@ class WWAIExposeMesh(FileMarkerMixin):
     FUNCTION = "expose"
     RETURN_TYPES = (FILE_3D_TYPE,)
     RETURN_NAMES = ("value",)
-    DESCRIPTION = "Opens a 3D file and marks it as an input WWAI supplies."
+    DESCRIPTION = (
+        "Opens a 3D file and marks it as an input WWAI supplies. Leave the "
+        f"file as \"{NO_FILE}\" to skip this reference for a run — the node "
+        "outputs None and any optional downstream input it feeds is ignored."
+    )
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -352,6 +394,8 @@ class WWAIExposeMesh(FileMarkerMixin):
 
     def expose(self, file, name, description):
         require_marker_name(name, type(self).__name__)
+        if _is_no_file(file):
+            return (None,)
         path = folder_paths.get_annotated_filepath(file)
         return (Types.File3D(path),)
 
