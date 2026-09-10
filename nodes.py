@@ -141,6 +141,40 @@ def metadata_widgets():
     }
 
 
+def required_widget():
+    """The tick box that says whether an artist MUST fill this input.
+
+    Plan 1961 (CFY6). WWAI used to INFER requiredness -- a file marker left on
+    NO_FILE was optional, and a scalar marker was always optional, so a text or
+    number input could never be made mandatory and clearing a file silently
+    turned a needed input into an optional one. The author declares it here
+    instead, and WWAI reads exactly this widget off the export.
+
+    Deliberately NOT part of ``metadata_widgets()``: the four OUTPUT markers
+    share that helper, and a workflow's result is never optional, so a tick box
+    on an output node would offer a choice that does not exist.
+
+    Spread LAST, after ``**metadata_widgets()``, on every input marker. A widget
+    inserted before ``name``/``description`` would shift their positions in the
+    ``widgets_values`` array of every workflow JSON already saved from ComfyUI's
+    own UI, loading the saved name into this toggle.
+    """
+    return {
+        "required": (
+            "BOOLEAN",
+            {
+                "default": True,
+                "label_on": "artist must fill this",
+                "label_off": "artist may leave this empty",
+                "tooltip": (
+                    "On: WWAI refuses to run until the artist supplies a value. "
+                    "Off: WWAI runs with the value saved in this node."
+                ),
+            },
+        ),
+    }
+
+
 def input_root_files(content_types=None, extensions=None):
     """Files directly in ComfyUI's input directory.
 
@@ -187,15 +221,23 @@ class FileMarkerMixin:
     carries, for the same reason.
     """
 
+    # `required` (plan 1961's tick box) is accepted here on both hooks though
+    # neither body reads it. VALIDATE_INPUTS is argspec-filtered by ComfyUI
+    # before the call, so it would tolerate a missing parameter -- but
+    # IS_CHANGED is NOT filtered, it is always called with every key declared
+    # in INPUT_TYPES()["required"], so adding a widget there is a signature
+    # change for IS_CHANGED whether the hook cares about the value or not.
+    # No default: ComfyUI always supplies it, so a default would silently
+    # hide a marker subclass whose widget failed to register.
     @classmethod
-    def IS_CHANGED(cls, file, name, description):
+    def IS_CHANGED(cls, file, name, description, required):
         if _is_no_file(file):
             return NO_FILE
         path = folder_paths.get_annotated_filepath(file)
         return os.path.getmtime(path), os.path.getsize(path)
 
     @classmethod
-    def VALIDATE_INPUTS(cls, file, name, description):
+    def VALIDATE_INPUTS(cls, file, name, description, required):
         if _is_no_file(file):
             return True
         if not folder_paths.exists_annotated_filepath(file):
@@ -215,9 +257,15 @@ class WWAIExposeText:
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {"value": ("STRING", {"multiline": True, "default": ""}), **metadata_widgets()}}
+        return {
+            "required": {
+                "value": ("STRING", {"multiline": True, "default": ""}),
+                **metadata_widgets(),
+                **required_widget(),
+            }
+        }
 
-    def expose(self, value, name, description):
+    def expose(self, value, name, description, required):
         require_marker_name(name, type(self).__name__)
         return (value,)
 
@@ -235,10 +283,11 @@ class WWAIExposeInt:
             "required": {
                 "value": ("INT", {"default": 0, "min": -0x7FFFFFFF, "max": 0x7FFFFFFF}),
                 **metadata_widgets(),
+                **required_widget(),
             }
         }
 
-    def expose(self, value, name, description):
+    def expose(self, value, name, description, required):
         require_marker_name(name, type(self).__name__)
         return (value,)
 
@@ -252,9 +301,37 @@ class WWAIExposeFloat:
 
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {"value": ("FLOAT", {"default": 0.0, "step": 0.01}), **metadata_widgets()}}
+        return {
+            "required": {
+                "value": ("FLOAT", {"default": 0.0, "step": 0.01}),
+                **metadata_widgets(),
+                **required_widget(),
+            }
+        }
 
-    def expose(self, value, name, description):
+    def expose(self, value, name, description, required):
+        require_marker_name(name, type(self).__name__)
+        return (value,)
+
+
+class WWAIExposeBool:
+    CATEGORY = INPUT_CATEGORY
+    FUNCTION = "expose"
+    RETURN_TYPES = ("BOOLEAN",)
+    RETURN_NAMES = ("value",)
+    DESCRIPTION = "Marks an on/off switch as controllable from WWAI."
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "value": ("BOOLEAN", {"default": False}),
+                **metadata_widgets(),
+                **required_widget(),
+            }
+        }
+
+    def expose(self, value, name, description, required):
         require_marker_name(name, type(self).__name__)
         return (value,)
 
@@ -276,10 +353,11 @@ class WWAIExposeImage(FileMarkerMixin):
             "required": {
                 "file": (input_root_files(content_types=["image"]), {"image_upload": True}),
                 **metadata_widgets(),
+                **required_widget(),
             }
         }
 
-    def expose(self, file, name, description):
+    def expose(self, file, name, description, required):
         require_marker_name(name, type(self).__name__)
         if _is_no_file(file):
             return (None, None)
@@ -327,10 +405,11 @@ class WWAIExposeVideo(FileMarkerMixin):
             "required": {
                 "file": (input_root_files(content_types=["video"]), {"video_upload": True}),
                 **metadata_widgets(),
+                **required_widget(),
             }
         }
 
-    def expose(self, file, name, description):
+    def expose(self, file, name, description, required):
         require_marker_name(name, type(self).__name__)
         if _is_no_file(file):
             return (None, None, None, 0.0)
@@ -360,10 +439,11 @@ class WWAIExposeAudio(FileMarkerMixin):
             "required": {
                 "file": (input_root_files(content_types=["audio", "video"]), {"audio_upload": True}),
                 **metadata_widgets(),
+                **required_widget(),
             }
         }
 
-    def expose(self, file, name, description):
+    def expose(self, file, name, description, required):
         require_marker_name(name, type(self).__name__)
         if _is_no_file(file):
             return (None,)
@@ -389,10 +469,11 @@ class WWAIExposeMesh(FileMarkerMixin):
             "required": {
                 "file": (input_root_files(extensions=MESH_EXTENSIONS), {"file_upload": True}),
                 **metadata_widgets(),
+                **required_widget(),
             }
         }
 
-    def expose(self, file, name, description):
+    def expose(self, file, name, description, required):
         require_marker_name(name, type(self).__name__)
         if _is_no_file(file):
             return (None,)
@@ -588,6 +669,7 @@ NODE_CLASS_MAPPINGS = {
     "WWAIExposeText": WWAIExposeText,
     "WWAIExposeInt": WWAIExposeInt,
     "WWAIExposeFloat": WWAIExposeFloat,
+    "WWAIExposeBool": WWAIExposeBool,
     "WWAIExposeImage": WWAIExposeImage,
     "WWAIExposeOutputImage": WWAIExposeOutputImage,
 }
@@ -596,6 +678,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WWAIExposeText": "WWAI Expose Text",
     "WWAIExposeInt": "WWAI Expose Int",
     "WWAIExposeFloat": "WWAI Expose Float",
+    "WWAIExposeBool": "WWAI Expose Bool",
     "WWAIExposeImage": "WWAI Expose Image",
     "WWAIExposeOutputImage": "WWAI Expose Output Image",
 }

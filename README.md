@@ -37,6 +37,7 @@ media markers and `value` on the scalar ones; WWAI rewrites exactly that key.
 | WWAI Expose Text | `STRING` |
 | WWAI Expose Int | `INT` |
 | WWAI Expose Float | `FLOAT` |
+| WWAI Expose Bool | `BOOLEAN` |
 | WWAI Expose Image | `IMAGE` + `MASK` |
 | WWAI Expose Audio | `AUDIO` |
 | WWAI Expose Video | `video`, `images`, `audio`, `fps` — see below |
@@ -100,14 +101,28 @@ whichever entry happens to be last — a third-party ordering convention WWAI
 would have to guess at. Writing the file here removes the guess.
 
 
-### Leaving an optional reference empty
+### Required, and leaving a reference empty
 
-Every file-based input marker (**Expose Image**, **Expose Audio**, **Expose
-Video**, **Expose Mesh**) lists `None` as the first choice on its `file`
-dropdown — a fresh node defaults to it. Picking `None` skips the file entirely
-instead of failing validation: the node returns `None` on every output
-(`fps` returns `0.0` on Expose Video, since it is a plain number) rather than
-a real payload.
+Every input marker carries a **required** tick box (default on). This is the
+one and only thing that decides whether WWAI makes an artist fill the input
+before a run: ticked, WWAI refuses to run until a value is supplied; unticked,
+WWAI runs with whatever value is saved in the node.
+
+This is a change from how WWAI used to behave: it used to *infer*
+requiredness from the `file` dropdown — a file marker left on `None` was
+optional, a scalar marker (text, number) was always optional and could never
+be made mandatory, and simply clearing a file silently turned a needed input
+into an optional one. The tick box replaces all of that guessing with an
+explicit author choice, for every input marker alike.
+
+`None` still means what it always meant on a file-based input marker's `file`
+dropdown (**Expose Image**, **Expose Audio**, **Expose Video**, **Expose
+Mesh**): it lists `None` as the first choice, a fresh node defaults to it, and
+picking it skips the file entirely inside the ComfyUI graph — the node
+returns `None` on every output (`fps` returns `0.0` on Expose Video, since it
+is a plain number) rather than a real payload, and WWAI writes `None` into
+that slot when an artist leaves an *unticked* file input empty. It is no
+longer what makes the input optional — the tick box is.
 
 This is what lets one workflow wire the *full* set of optional reference
 slots a downstream node exposes (e.g. MiniMax H3 Reference to Video's up to 9
@@ -118,11 +133,12 @@ downstream socket is declared optional and its node checks for `None`;
 connecting a marker left on `None` into a *required* input still fails, as it
 always did.
 
-Every node has a **name** and **description** field. The name must not be
+Every node has a **name** and **description** field, and every input marker
+adds the **required** tick box above as a third. The name must not be
 blank and must be unique in the workflow — a blank one fails the run rather
-than reaching WWAI as an unnamed parameter. Leave both as widgets; converting
-one into a wired input replaces its text with a link, and WWAI's upload check
-rejects that.
+than reaching WWAI as an unnamed parameter. Leave all three as widgets;
+converting one into a wired input replaces its value with a link, and WWAI's
+upload check rejects that.
 
 ### Gaussian Splats and point clouds
 
@@ -141,6 +157,8 @@ python -m unittest
 Runs anywhere — no ComfyUI, no torch. `test_wwai_markers_core.py` covers the
 byte-for-byte copy and the name/cardinality rules on their own;
 `test_nodes_contract.py` stubs ComfyUI's four host modules and exercises the
-real node code, pinning the socket type strings and the terminal-node flag.
+real node code, pinning the socket type strings, the terminal-node flag, and
+the required-toggle contract — every input marker declares it (default on),
+no output marker does.
 Verification in a real ComfyUI is still required for registration and socket
 compatibility.

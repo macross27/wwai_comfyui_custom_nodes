@@ -17,6 +17,7 @@ Real-ComfyUI verification is still required for registration and socket
 compatibility; this is the regression net underneath it.
 """
 
+import inspect
 import os
 import shutil
 import sys
@@ -290,7 +291,7 @@ def _written(entry):
 
 
 ALL_NODES = {
-    "WWAIExposeText", "WWAIExposeInt", "WWAIExposeFloat", "WWAIExposeImage",
+    "WWAIExposeText", "WWAIExposeInt", "WWAIExposeFloat", "WWAIExposeBool", "WWAIExposeImage",
     "WWAIExposeAudio", "WWAIExposeVideo", "WWAIExposeMesh",
     "WWAIExposeOutputImage", "WWAIExposeOutputAudio",
     "WWAIExposeOutputVideo", "WWAIExposeOutputMesh",
@@ -316,6 +317,16 @@ class RegistrationTest(unittest.TestCase):
             self.assertIn("name", required, name)
             self.assertIn("description", required, name)
 
+    def test_every_input_marker_declares_a_required_toggle(self):
+        for name in ALL_NODES - OUTPUT_NODES:
+            widget = nodes.NODE_CLASS_MAPPINGS[name].INPUT_TYPES()["required"]["required"]
+            self.assertEqual(widget[0], "BOOLEAN", name)
+            self.assertIs(widget[1]["default"], True, name)
+
+    def test_no_output_marker_declares_a_required_toggle(self):
+        for name in OUTPUT_NODES:
+            self.assertNotIn("required", nodes.NODE_CLASS_MAPPINGS[name].INPUT_TYPES()["required"])
+
     def test_output_markers_use_the_legacy_output_node_flag(self):
         # `is_output_node=True` belongs to the newer schema API and has NO
         # effect here — a terminal marker spelled that way is pruned from the
@@ -326,11 +337,35 @@ class RegistrationTest(unittest.TestCase):
             self.assertFalse(hasattr(cls, "is_output_node"), name)
 
 
+class SignatureContractTest(unittest.TestCase):
+    """A widget added to INPUT_TYPES()["required"] must reach every hook
+    ComfyUI calls with the node's declared inputs -- this is the test that
+    plan 1961 needed and did not have, when `required_widget()` shipped
+    without updating IS_CHANGED/VALIDATE_INPUTS on FileMarkerMixin.
+    """
+
+    def test_is_changed_accepts_every_required_widget(self):
+        for name, cls in nodes.NODE_CLASS_MAPPINGS.items():
+            if not hasattr(cls, "IS_CHANGED"):
+                continue
+            accepted = set(inspect.signature(cls.IS_CHANGED).parameters)
+            required = set(cls.INPUT_TYPES()["required"])
+            missing = required - accepted
+            self.assertFalse(missing, f"{name}.IS_CHANGED does not accept {missing}")
+
+    def test_expose_accepts_every_required_widget(self):
+        for name, cls in nodes.NODE_CLASS_MAPPINGS.items():
+            accepted = set(inspect.signature(cls.expose).parameters) - {"self"}
+            required = set(cls.INPUT_TYPES()["required"])
+            missing = required - accepted
+            self.assertFalse(missing, f"{name}.expose does not accept {missing}")
+
+
 class SocketTypeTest(unittest.TestCase):
     def test_the_input_key_table_wwai_rewrites_against(self):
         for name in ("WWAIExposeImage", "WWAIExposeAudio", "WWAIExposeVideo", "WWAIExposeMesh"):
             self.assertIn("file", nodes.NODE_CLASS_MAPPINGS[name].INPUT_TYPES()["required"], name)
-        for name in ("WWAIExposeText", "WWAIExposeInt", "WWAIExposeFloat"):
+        for name in ("WWAIExposeText", "WWAIExposeInt", "WWAIExposeFloat", "WWAIExposeBool"):
             self.assertIn("value", nodes.NODE_CLASS_MAPPINGS[name].INPUT_TYPES()["required"], name)
 
     def test_video_input_serves_both_video_worlds(self):
@@ -371,13 +406,19 @@ class SocketTypeTest(unittest.TestCase):
 
 class InputMarkerTest(unittest.TestCase):
     def test_image_marker_loads_real_pixels(self):
-        image, mask = nodes.WWAIExposeImage().expose(file="shot.png", name="ref", description="")
+        image, mask = nodes.WWAIExposeImage().expose(file="shot.png", name="ref", description="", required=True)
         self.assertEqual(image.shape, (1, 6, 8, 3))
         self.assertEqual(mask.shape, (1, 6, 8))
 
+    def test_bool_marker_returns_the_value_unchanged(self):
+        self.assertEqual(
+            nodes.WWAIExposeBool().expose(value=True, name="flag", description="", required=False),
+            (True,),
+        )
+
     def test_video_marker_opens_the_file_and_splits_it(self):
         video, images, audio, fps = nodes.WWAIExposeVideo().expose(
-            file="clip.mp4", name="src", description=""
+            file="clip.mp4", name="src", description="", required=True
         )
         self.assertTrue(video.path.endswith("clip.mp4"))
         self.assertEqual(images.shape, (5, 8, 8, 3))
@@ -389,7 +430,7 @@ class InputMarkerTest(unittest.TestCase):
         # The whole point of splitting: a VHS-shaped workflow can take the
         # artist's video in and put a finished one back out with sound.
         _, images, audio, fps = nodes.WWAIExposeVideo().expose(
-            file="clip.mp4", name="src", description=""
+            file="clip.mp4", name="src", description="", required=True
         )
         result = nodes.WWAIExposeOutputVideo().expose(
             name="out", description="", images=images, audio=audio, fps=fps
@@ -397,7 +438,7 @@ class InputMarkerTest(unittest.TestCase):
         self.assertTrue(os.path.isfile(_written(result["ui"]["wwai_result"][0])))
 
     def test_mesh_marker_keeps_the_splat_container(self):
-        (payload,) = nodes.WWAIExposeMesh().expose(file="splat.ply", name="geo", description="")
+        (payload,) = nodes.WWAIExposeMesh().expose(file="splat.ply", name="geo", description="", required=True)
         self.assertEqual(payload.format, "ply")
 
     def test_a_file_staged_after_the_listing_still_validates(self):
@@ -405,11 +446,11 @@ class InputMarkerTest(unittest.TestCase):
         # directory listing INPUT_TYPES was built from.
         late = "staged_by_wwai.png"
         Image.new("RGB", (2, 2)).save(os.path.join(_IN, late))
-        self.assertIs(nodes.WWAIExposeImage.VALIDATE_INPUTS(late, "n", ""), True)
-        self.assertIn("not found", nodes.WWAIExposeImage.VALIDATE_INPUTS("nope.png", "n", ""))
+        self.assertIs(nodes.WWAIExposeImage.VALIDATE_INPUTS(late, "n", "", True), True)
+        self.assertIn("not found", nodes.WWAIExposeImage.VALIDATE_INPUTS("nope.png", "n", "", True))
 
     def test_audio_marker_loads_a_waveform(self):
-        (payload,) = nodes.WWAIExposeAudio().expose(file="track.flac", name="bgm", description="")
+        (payload,) = nodes.WWAIExposeAudio().expose(file="track.flac", name="bgm", description="", required=True)
         self.assertEqual(payload["sample_rate"], 44100)
         self.assertEqual(payload["waveform"].shape, (1, 2, 16))
 
@@ -420,25 +461,25 @@ class InputMarkerTest(unittest.TestCase):
 
     def test_image_marker_leaves_the_reference_empty_when_no_file_is_chosen(self):
         self.assertEqual(
-            nodes.WWAIExposeImage().expose(file=nodes.NO_FILE, name="ref", description=""),
+            nodes.WWAIExposeImage().expose(file=nodes.NO_FILE, name="ref", description="", required=False),
             (None, None),
         )
 
     def test_video_marker_leaves_the_reference_empty_when_no_file_is_chosen(self):
         self.assertEqual(
-            nodes.WWAIExposeVideo().expose(file=nodes.NO_FILE, name="src", description=""),
+            nodes.WWAIExposeVideo().expose(file=nodes.NO_FILE, name="src", description="", required=False),
             (None, None, None, 0.0),
         )
 
     def test_audio_marker_leaves_the_reference_empty_when_no_file_is_chosen(self):
         self.assertEqual(
-            nodes.WWAIExposeAudio().expose(file=nodes.NO_FILE, name="bgm", description=""),
+            nodes.WWAIExposeAudio().expose(file=nodes.NO_FILE, name="bgm", description="", required=False),
             (None,),
         )
 
     def test_mesh_marker_leaves_the_reference_empty_when_no_file_is_chosen(self):
         self.assertEqual(
-            nodes.WWAIExposeMesh().expose(file=nodes.NO_FILE, name="geo", description=""),
+            nodes.WWAIExposeMesh().expose(file=nodes.NO_FILE, name="geo", description="", required=False),
             (None,),
         )
 
@@ -450,18 +491,21 @@ class InputMarkerTest(unittest.TestCase):
             ("WWAIExposeMesh", {}),
         ):
             with self.assertRaises(MarkerContractError, msg=name):
-                nodes.NODE_CLASS_MAPPINGS[name]().expose(file=nodes.NO_FILE, name="  ", description="", **kwargs)
+                nodes.NODE_CLASS_MAPPINGS[name]().expose(
+                    file=nodes.NO_FILE, name="  ", description="", required=True, **kwargs
+                )
 
     def test_no_file_passes_validation_without_touching_disk(self):
         for name in ("WWAIExposeImage", "WWAIExposeAudio", "WWAIExposeVideo", "WWAIExposeMesh"):
-            self.assertIs(nodes.NODE_CLASS_MAPPINGS[name].VALIDATE_INPUTS(nodes.NO_FILE, "n", ""), True, name)
-            self.assertIs(nodes.NODE_CLASS_MAPPINGS[name].VALIDATE_INPUTS("", "n", ""), True, name)
+            self.assertIs(nodes.NODE_CLASS_MAPPINGS[name].VALIDATE_INPUTS(nodes.NO_FILE, "n", "", True), True, name)
+            self.assertIs(nodes.NODE_CLASS_MAPPINGS[name].VALIDATE_INPUTS("", "n", "", True), True, name)
 
     def test_every_input_marker_refuses_a_blank_name(self):
         cases = [
             ("WWAIExposeText", {"value": "hi"}),
             ("WWAIExposeInt", {"value": 1}),
             ("WWAIExposeFloat", {"value": 1.0}),
+            ("WWAIExposeBool", {"value": True}),
             ("WWAIExposeImage", {"file": "shot.png"}),
             ("WWAIExposeAudio", {"file": "track.flac"}),
             ("WWAIExposeVideo", {"file": "clip.mp4"}),
@@ -469,7 +513,7 @@ class InputMarkerTest(unittest.TestCase):
         ]
         for name, kwargs in cases:
             with self.assertRaises(MarkerContractError, msg=name):
-                nodes.NODE_CLASS_MAPPINGS[name]().expose(name="  ", description="", **kwargs)
+                nodes.NODE_CLASS_MAPPINGS[name]().expose(name="  ", description="", required=True, **kwargs)
 
 
 class OutputMarkerTest(unittest.TestCase):
