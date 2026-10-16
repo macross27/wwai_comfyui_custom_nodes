@@ -38,7 +38,7 @@ media markers and `value` on the scalar ones; WWAI rewrites exactly that key.
 | WWAI Expose Int | `INT` |
 | WWAI Expose Float | `FLOAT` |
 | WWAI Expose Bool | `BOOLEAN` |
-| WWAI Expose Image | `IMAGE` + `MASK` |
+| WWAI Expose Image | `IMAGE` + `MASK` (also reads `.exr`, kept scene-linear and unclamped) |
 | WWAI Expose Audio | `AUDIO` |
 | WWAI Expose Video | `video`, `images`, `audio`, `fps` — see below |
 | WWAI Expose Mesh | `FILE_3D` |
@@ -48,10 +48,18 @@ one file.
 
 | Node | Accepts | Writes |
 |---|---|---|
-| WWAI Expose Output Image | `IMAGE` | `.png` |
+| WWAI Expose Output Image | `IMAGE` | `.png` (8/16-bit), `.exr` (16/32-bit float) or `.avif` (8/10-bit, HDR) |
 | WWAI Expose Output Audio | `AUDIO` | `.flac`, `.mp3` or `.opus` |
 | WWAI Expose Output Video | `video`, **or** `images` + `audio` + `fps` | `.mp4` |
 | WWAI Expose Output Mesh | `MESH` or any of ComfyUI's 13 `FILE_3D_*` types | `.glb` from geometry; the source file copied verbatim otherwise |
+
+The image output's `format`, `bit_depth` and `input_color_space` widgets match
+core's **Save Image (Advanced)** and use its encoders. `input_color_space` says
+what the incoming image is: EXR is always written scene-linear (from sRGB, HDR
+= HLG Rec.2020, or linear), and AVIF is tagged sRGB, BT.2020/HLG or BT.2020/PQ.
+An unsupported pairing is refused at queue time. The defaults (`png`, `auto`,
+`sRGB`) give the same 8-bit PNG as before. On a ComfyUI without
+Save Image (Advanced), only `png` is offered.
 
 ### The two video worlds
 

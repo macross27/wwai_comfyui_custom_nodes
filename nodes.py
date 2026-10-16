@@ -24,6 +24,7 @@ import logging
 import os
 from fractions import Fraction
 
+import av
 import folder_paths
 import numpy as np
 import torch
@@ -73,6 +74,17 @@ except ImportError as exc:  # pragma: no cover - depends on the ComfyUI host
     get_mesh_batch_item = save_glb = None
     GLB_WRITER_IMPORT_ERROR = exc
 
+# ComfyUI's own Save Image (Advanced) encoders, for the same reason: the
+# sRGB/HLG -> scene-linear EXR conversion and the AVIF colour tagging are
+# colour-science that must match what core writes, not a second opinion.
+try:
+    from comfy_extras.nodes_images import _encode_image, _save_avif, inject_exr_metadata, inject_png_metadata
+
+    IMAGE_ENCODER_IMPORT_ERROR = None
+except ImportError as exc:  # pragma: no cover - depends on the ComfyUI host
+    _encode_image = _save_avif = inject_exr_metadata = inject_png_metadata = None
+    IMAGE_ENCODER_IMPORT_ERROR = exc
+
 
 # --- socket types -----------------------------------------------------------
 #
@@ -105,6 +117,20 @@ MESH_OUTPUT_TYPE = ",".join(
 )
 
 MESH_EXTENSIONS = (".gltf", ".glb", ".obj", ".fbx", ".stl", ".spz", ".splat", ".ply", ".ksplat")
+
+# What core's Save Image (Advanced) can write, per format: (bit depths, input
+# colour spaces). The first bit depth is what "auto" picks. Flat combos rather
+# than core's DynamicCombo because these markers use the legacy node API, so a
+# mismatched pair is refused by name instead of being hidden by the UI.
+IMAGE_FORMATS = {
+    "png": (("8-bit", "16-bit"), ("sRGB",)),
+    "exr": (("16-bit float", "32-bit float"), ("sRGB", "HDR", "linear")),
+    "avif": (("auto", "8-bit YUV420", "10-bit YUV420"), ("sRGB", "HDR", "HDR PQ")),
+}
+IMAGE_BIT_DEPTHS = ("auto", "8-bit", "16-bit", "16-bit float", "32-bit float", "8-bit YUV420", "10-bit YUV420")
+IMAGE_COLOR_SPACES = ("sRGB", "HDR", "HDR PQ", "linear")
+# AVIF keeps core's default quality; there is no single-image reason to differ.
+AVIF_CRF = 18
 
 # Where output markers write. WWAI locates the result by node id out of the
 # history response, so the filename only has to be unique, not meaningful.
@@ -210,6 +236,33 @@ def save_path(class_name, name, extension):
 def wwai_result(entry):
     """The one shape every output marker returns."""
     return {"ui": {"wwai_result": [entry]}}
+
+
+def load_exr(path):
+    """An EXR as an IMAGE + MASK pair, pixels left exactly as stored.
+
+    PIL cannot read EXR; PyAV (already a ComfyUI dependency) can. EXR is
+    scene-linear and may exceed 1.0, so nothing is clamped or re-encoded to
+    sRGB here — the same linear the WWAI output marker and core's Save Image
+    (Advanced) write. A workflow that wants sRGB puts core's Convert Image
+    Color Space (linear -> sRGB) after this node.
+    """
+    with av.open(path) as container:
+        frame = next(container.decode(video=0))
+        # Grey+alpha decodes to 2 components, RGBA to 4.
+        components = len(frame.format.components)
+        has_alpha = components in (2, 4)
+        if components == 1:
+            # Read grey as grey: swscale's grey->RGB path range-maps and shifts values.
+            pixels = np.repeat(frame.to_ndarray(format="grayf32le")[..., None], 3, axis=-1)
+        else:
+            pixels = frame.to_ndarray(format="gbrapf32le" if has_alpha else "gbrpf32le")
+    image = torch.from_numpy(np.ascontiguousarray(pixels[..., :3]))[None,]
+    if has_alpha:
+        mask = 1.0 - torch.from_numpy(np.ascontiguousarray(pixels[..., 3]))
+    else:
+        mask = torch.zeros((64, 64), dtype=torch.float32)
+    return (image, mask.unsqueeze(0))
 
 
 class FileMarkerMixin:
@@ -362,6 +415,8 @@ class WWAIExposeImage(FileMarkerMixin):
         if _is_no_file(file):
             return (None, None)
         path = folder_paths.get_annotated_filepath(file)
+        if extension_of(path, "") == "exr":
+            return load_exr(path)
         img = ImageOps.exif_transpose(Image.open(path))
         rgb = np.array(img.convert("RGB")).astype(np.float32) / 255.0
         image = torch.from_numpy(rgb)[None,]
@@ -489,19 +544,94 @@ class WWAIExposeOutputImage:
     FUNCTION = "expose"
     RETURN_TYPES = ()
     OUTPUT_NODE = True
-    DESCRIPTION = "Saves the finished image and marks it as WWAI's result."
+    DESCRIPTION = (
+        "Saves the finished image and marks it as WWAI's result. Writes PNG, "
+        "or HDR-capable EXR / AVIF with the same encoders as Save Image (Advanced)."
+    )
 
     @classmethod
     def INPUT_TYPES(cls):
+        # Optional, and after name/description: API prompts exported before
+        # these existed carry no such keys and must still validate, and the
+        # saved widgets_values positions of name/description stay put.
+        formats = list(IMAGE_FORMATS) if IMAGE_ENCODER_IMPORT_ERROR is None else ["png"]
         return {
             "required": {"value": (IMAGE_TYPE,), **metadata_widgets()},
+            "optional": {
+                "format": (formats, {"default": "png"}),
+                "bit_depth": (
+                    list(IMAGE_BIT_DEPTHS),
+                    {
+                        "default": "auto",
+                        "tooltip": (
+                            "auto: 8-bit for PNG, 16-bit float for EXR, and for AVIF 8-bit "
+                            "on sRGB / 10-bit on HDR.\n"
+                            "png: 8-bit, 16-bit. exr: 16-bit float, 32-bit float. "
+                            "avif: 8-bit YUV420, 10-bit YUV420."
+                        ),
+                    },
+                ),
+                "input_color_space": (
+                    list(IMAGE_COLOR_SPACES),
+                    {
+                        "default": "sRGB",
+                        "tooltip": (
+                            "What the incoming image is, not what the file becomes.\n"
+                            "png: sRGB.\n"
+                            "exr: sRGB, HDR (HLG Rec.2020) or linear; always written scene-linear.\n"
+                            "avif: sRGB, HDR (BT.2020/HLG) or HDR PQ (BT.2020/PQ)."
+                        ),
+                    },
+                ),
+            },
             "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
 
-    def expose(self, value, name, description, prompt=None, extra_pnginfo=None):
+    @classmethod
+    def VALIDATE_INPUTS(cls, format="png", bit_depth="auto", input_color_space="sRGB"):
+        # Checked before the queue runs, so a wrong pairing fails in seconds
+        # rather than after the whole workflow has rendered.
+        if format not in IMAGE_FORMATS:
+            return f"{cls.__name__}: unknown format {format!r}."
+        depths, spaces = IMAGE_FORMATS[format]
+        if bit_depth != "auto" and bit_depth not in depths:
+            return f"{cls.__name__}: {format} cannot be written at {bit_depth!r}; choose one of {', '.join(depths)}."
+        if input_color_space not in spaces:
+            return f"{cls.__name__}: {format} does not take {input_color_space!r} input; choose one of {', '.join(spaces)}."
+        return True
+
+    def expose(self, value, name, description, format="png", bit_depth="auto", input_color_space="sRGB", prompt=None, extra_pnginfo=None):
         class_name = type(self).__name__
         require_marker_name(name, class_name)
         image = require_single(list(value), class_name, "image")
+
+        verdict = self.VALIDATE_INPUTS(format, bit_depth, input_color_space)
+        if verdict is not True:
+            raise MarkerContractError(verdict)
+        if bit_depth == "auto":
+            bit_depth = IMAGE_FORMATS[format][0][0]
+
+        if format != "png" or bit_depth != "8-bit":
+            if IMAGE_ENCODER_IMPORT_ERROR is not None:
+                raise RuntimeError(
+                    f"{class_name}: this ComfyUI has no Save Image (Advanced) encoders "
+                    f"(comfy_extras.nodes_images): {IMAGE_ENCODER_IMPORT_ERROR}"
+                )
+            path, entry = save_path(class_name, name, format)
+            if format == "avif":
+                metadata = dict(extra_pnginfo or {})
+                if prompt is not None:
+                    metadata["prompt"] = prompt
+                _save_avif(image.unsqueeze(0), path, bit_depth, input_color_space, AVIF_CRF, metadata=metadata)
+                return wwai_result(entry)
+            encoded = _encode_image(image, format, bit_depth, input_color_space)
+            if format == "exr":
+                encoded = inject_exr_metadata(encoded, prompt, extra_pnginfo, input_color_space)
+            else:
+                encoded = inject_png_metadata(encoded, prompt, extra_pnginfo)
+            with open(path, "wb") as handle:
+                handle.write(encoded)
+            return wwai_result(entry)
 
         metadata = PngInfo()
         if prompt is not None:

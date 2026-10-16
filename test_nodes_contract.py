@@ -27,6 +27,7 @@ import unittest
 from enum import Enum
 from fractions import Fraction
 
+import av
 import numpy as np
 from PIL import Image
 
@@ -410,6 +411,22 @@ class InputMarkerTest(unittest.TestCase):
         self.assertEqual(image.shape, (1, 6, 8, 3))
         self.assertEqual(mask.shape, (1, 6, 8))
 
+    def test_image_marker_loads_an_exr_as_unclamped_linear(self):
+        # PIL cannot open EXR; an HDR value above 1.0 must reach the graph as is.
+        pixels = np.full((6, 8, 3), 4.0, dtype=np.float32)
+        pixels[0, 0] = (0.25, 0.5, 2.0)
+        codec = av.CodecContext.create("exr", "w")
+        codec.width, codec.height, codec.pix_fmt = 8, 6, "gbrpf32le"
+        codec.time_base = Fraction(1, 1)
+        frame = av.VideoFrame.from_ndarray(pixels, format="gbrpf32le")
+        frame.pts = 0
+        with open(os.path.join(_IN, "plate.exr"), "wb") as handle:
+            handle.write(b"".join(bytes(p) for p in list(codec.encode(frame)) + list(codec.encode(None))))
+        image, mask = nodes.WWAIExposeImage().expose(file="plate.exr", name="ref", description="", required=True)
+        self.assertEqual(image.shape, (1, 6, 8, 3))
+        np.testing.assert_allclose(np.asarray(image)[0], pixels, rtol=1e-3)
+        self.assertEqual(mask.shape, (1, 64, 64))
+
     def test_bool_marker_returns_the_value_unchanged(self):
         self.assertEqual(
             nodes.WWAIExposeBool().expose(value=True, name="flag", description="", required=False),
@@ -537,6 +554,27 @@ class OutputMarkerTest(unittest.TestCase):
                 value=_Tensor(arr), name="result", description=""
             )
         self.assertIn("got 2", str(caught.exception))
+
+    def test_image_format_widgets_are_optional(self):
+        # API prompts exported before these widgets existed carry no such keys;
+        # a required input would make ComfyUI refuse every one of them.
+        spec = nodes.WWAIExposeOutputImage.INPUT_TYPES()
+        self.assertEqual(set(spec["required"]), {"value", "name", "description"})
+        self.assertEqual(set(spec["optional"]), {"format", "bit_depth", "input_color_space"})
+
+    def test_image_marker_refuses_a_format_pairing_core_cannot_write(self):
+        validate = nodes.WWAIExposeOutputImage.VALIDATE_INPUTS
+        self.assertIs(validate(), True)
+        self.assertIs(validate("exr", "32-bit float", "linear"), True)
+        self.assertIs(validate("avif", "auto", "HDR PQ"), True)
+        self.assertIn("16-bit", validate("png", "32-bit float", "sRGB"))
+        self.assertIn("HDR PQ", validate("exr", "auto", "HDR PQ"))
+        self.assertIn("linear", validate("png", "auto", "linear"))
+        with self.assertRaises(MarkerContractError):
+            nodes.WWAIExposeOutputImage().expose(
+                value=_Tensor(np.zeros((1, 4, 4, 3), dtype=np.float32)), name="result", description="",
+                format="avif", bit_depth="16-bit", input_color_space="sRGB",
+            )
 
     def test_video_marker_writes_and_reports_an_mp4_from_a_finished_video(self):
         video = _VideoFromFile(os.path.join(_IN, "clip.mp4"))
