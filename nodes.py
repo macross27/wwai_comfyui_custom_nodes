@@ -389,6 +389,83 @@ class WWAIExposeBool:
         return (value,)
 
 
+class AnyType(str):
+    """ComfyUI's legacy wildcard socket type.
+
+    A dropdown on a legacy node is declared as a bare list of options, and core
+    only accepts a link into it from a "*" output (validate_node_input). It also
+    skips the value-in-list check for a linked input, so WWAIExposeCombo checks
+    the value against its own choices instead.
+    """
+
+    def __ne__(self, other):
+        return False
+
+
+ANY_TYPE = AnyType("*")
+
+
+def parse_choices(choices, class_name):
+    """The author's choices, one per line, blank lines dropped."""
+    parsed = [line.strip() for line in (choices or "").splitlines() if line.strip()]
+    if not parsed:
+        raise MarkerContractError(
+            f"{class_name}: the 'choices' field is empty. Type the dropdown's "
+            f"options, one per line, exactly as the target node lists them."
+        )
+    duplicates = sorted({c for c in parsed if parsed.count(c) > 1})
+    if duplicates:
+        raise MarkerContractError(f"{class_name}: duplicate choices {duplicates}.")
+    return parsed
+
+
+class WWAIExposeCombo:
+    CATEGORY = INPUT_CATEGORY
+    FUNCTION = "expose"
+    RETURN_TYPES = (ANY_TYPE,)
+    RETURN_NAMES = ("value",)
+    DESCRIPTION = (
+        "Marks a dropdown choice (e.g. mode: turbo / base / v1) as controllable "
+        "from WWAI. Convert the target node's dropdown to an input and wire this into it."
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "value": ("STRING", {"default": "", "tooltip": "The choice used when WWAI supplies none."}),
+                "choices": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "tooltip": "The dropdown's options, one per line, spelled exactly as the target node lists them.",
+                    },
+                ),
+                **metadata_widgets(),
+                **required_widget(),
+            }
+        }
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, value, choices, name, description, required):
+        try:
+            options = parse_choices(choices, cls.__name__)
+        except MarkerContractError as exc:
+            return str(exc)
+        if value not in options:
+            return f"{cls.__name__}: {value!r} is not one of the choices {options}."
+        return True
+
+    def expose(self, value, choices, name, description, required):
+        class_name = type(self).__name__
+        require_marker_name(name, class_name)
+        options = parse_choices(choices, class_name)
+        if value not in options:
+            raise MarkerContractError(f"{class_name}: {value!r} is not one of the choices {options}.")
+        return (value,)
+
+
 class WWAIExposeImage(FileMarkerMixin):
     CATEGORY = INPUT_CATEGORY
     FUNCTION = "expose"
@@ -800,6 +877,7 @@ NODE_CLASS_MAPPINGS = {
     "WWAIExposeInt": WWAIExposeInt,
     "WWAIExposeFloat": WWAIExposeFloat,
     "WWAIExposeBool": WWAIExposeBool,
+    "WWAIExposeCombo": WWAIExposeCombo,
     "WWAIExposeImage": WWAIExposeImage,
     "WWAIExposeOutputImage": WWAIExposeOutputImage,
 }
@@ -809,6 +887,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WWAIExposeInt": "WWAI Expose Int",
     "WWAIExposeFloat": "WWAI Expose Float",
     "WWAIExposeBool": "WWAI Expose Bool",
+    "WWAIExposeCombo": "WWAI Expose Combo",
     "WWAIExposeImage": "WWAI Expose Image",
     "WWAIExposeOutputImage": "WWAI Expose Output Image",
 }

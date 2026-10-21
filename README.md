@@ -38,6 +38,7 @@ media markers and `value` on the scalar ones; WWAI rewrites exactly that key.
 | WWAI Expose Int | `INT` |
 | WWAI Expose Float | `FLOAT` |
 | WWAI Expose Bool | `BOOLEAN` |
+| WWAI Expose Combo | a dropdown choice (`*`) — see below |
 | WWAI Expose Image | `IMAGE` + `MASK` (also reads `.exr`, kept scene-linear and unclamped) |
 | WWAI Expose Audio | `AUDIO` |
 | WWAI Expose Video | `video`, `images`, `audio`, `fps` — see below |
@@ -108,6 +109,22 @@ metadata PNG, a silent video and an "-audio" mux, where the real result is
 whichever entry happens to be last — a third-party ordering convention WWAI
 would have to guess at. Writing the file here removes the guess.
 
+
+
+### Dropdown (combo) inputs
+
+**Expose Combo** controls a dropdown on another node, such as a `mode` of
+`turbo` / `base` / `v1`. Its `choices` field lists the dropdown's options, one
+per line, spelled exactly as the target node lists them. `value` is the choice
+used when WWAI supplies none. On the target node, right-click the dropdown and
+convert it to an input (in the new frontend, drag a link onto the widget), then
+wire `value` into it.
+
+The output is the `*` wildcard type, because that is the only type core lets
+link into a legacy dropdown. Core does not check a linked dropdown's value
+against its list, so this marker checks `value` against `choices` and refuses
+the run if it is not one of them. WWAI rewrites `value` and shows `choices` to
+the artist as the dropdown's options.
 
 ### Required, and leaving a reference empty
 

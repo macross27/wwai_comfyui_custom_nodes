@@ -292,7 +292,7 @@ def _written(entry):
 
 
 ALL_NODES = {
-    "WWAIExposeText", "WWAIExposeInt", "WWAIExposeFloat", "WWAIExposeBool", "WWAIExposeImage",
+    "WWAIExposeText", "WWAIExposeInt", "WWAIExposeFloat", "WWAIExposeBool", "WWAIExposeCombo", "WWAIExposeImage",
     "WWAIExposeAudio", "WWAIExposeVideo", "WWAIExposeMesh",
     "WWAIExposeOutputImage", "WWAIExposeOutputAudio",
     "WWAIExposeOutputVideo", "WWAIExposeOutputMesh",
@@ -433,6 +433,23 @@ class InputMarkerTest(unittest.TestCase):
             (True,),
         )
 
+    def test_combo_marker_returns_a_listed_choice(self):
+        self.assertEqual(
+            nodes.WWAIExposeCombo().expose(value="base", choices="turbo\nbase\nv1\n", name="mode", description="", required=True),
+            ("base",),
+        )
+
+    def test_combo_marker_refuses_a_value_not_in_its_choices(self):
+        with self.assertRaises(MarkerContractError):
+            nodes.WWAIExposeCombo().expose(value="v2", choices="turbo\nbase\nv1", name="mode", description="", required=True)
+        self.assertIsInstance(
+            nodes.WWAIExposeCombo.VALIDATE_INPUTS(value="v2", choices="turbo\nbase", name="mode", description="", required=True),
+            str,
+        )
+
+    def test_combo_marker_output_links_into_a_legacy_dropdown(self):
+        self.assertFalse(nodes.WWAIExposeCombo.RETURN_TYPES[0] != ["turbo", "base"])
+
     def test_video_marker_opens_the_file_and_splits_it(self):
         video, images, audio, fps = nodes.WWAIExposeVideo().expose(
             file="clip.mp4", name="src", description="", required=True
@@ -523,6 +540,7 @@ class InputMarkerTest(unittest.TestCase):
             ("WWAIExposeInt", {"value": 1}),
             ("WWAIExposeFloat", {"value": 1.0}),
             ("WWAIExposeBool", {"value": True}),
+            ("WWAIExposeCombo", {"value": "turbo", "choices": "turbo\nbase"}),
             ("WWAIExposeImage", {"file": "shot.png"}),
             ("WWAIExposeAudio", {"file": "track.flac"}),
             ("WWAIExposeVideo", {"file": "clip.mp4"}),
