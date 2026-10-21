@@ -447,6 +447,16 @@ class InputMarkerTest(unittest.TestCase):
             str,
         )
 
+    def test_combo_marker_hands_a_number_dropdown_a_number(self):
+        expose = nodes.WWAIExposeCombo().expose
+        self.assertEqual(expose(value="2", choices="4\n2\n1", name="tc", description="", required=True), (2,))
+        self.assertIsInstance(expose(value="2", choices="4\n2\n1", name="tc", description="", required=True)[0], int)
+        self.assertEqual(expose(value="0.5", choices="1\n0.5", name="s", description="", required=True), (0.5,))
+        self.assertEqual(
+            expose(value="2", choices="4\n2\n1", name="tc", description="", required=True, value_type="text"),
+            ("2",),
+        )
+
     def test_combo_marker_output_links_into_a_legacy_dropdown(self):
         self.assertFalse(nodes.WWAIExposeCombo.RETURN_TYPES[0] != ["turbo", "base"])
 

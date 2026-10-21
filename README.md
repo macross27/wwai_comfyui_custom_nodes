@@ -126,6 +126,13 @@ against its list, so this marker checks `value` against `choices` and refuses
 the run if it is not one of them. WWAI rewrites `value` and shows `choices` to
 the artist as the dropdown's options.
 
+Some dropdowns hold numbers rather than text — FlashVSR's
+`temporal_compression` is `[4, 2, 1]` — and the target compares what it gets
+against them, so the text `"2"` would never match the number `2`.
+`value_type` decides what is handed on: `auto` (the default) gives an int when
+every choice is a whole number, a float when every choice is a number, and
+text otherwise. Pick `text` for a dropdown that lists numbers as text.
+
 ### Required, and leaving a reference empty
 
 Every input marker carries a **required** tick box (default on). This is the

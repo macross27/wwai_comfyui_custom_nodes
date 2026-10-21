@@ -419,6 +419,47 @@ def parse_choices(choices, class_name):
     return parsed
 
 
+# What the choice is handed on as. A dropdown can list numbers (FlashVSR's
+# temporal_compression is [4, 2, 1]), and the target compares the value it
+# gets against them, so the text "2" would never match the int 2.
+COMBO_VALUE_TYPES = ("auto", "text", "int", "float")
+
+
+def _as_number(text, kind):
+    try:
+        return kind(text)
+    except ValueError:
+        return None
+
+
+def combo_value_type(options, value_type):
+    """Resolve "auto": int if every choice is a whole number, float if every
+    choice is a number, text otherwise."""
+    if value_type != "auto":
+        return value_type
+    if all(_as_number(o, int) is not None for o in options):
+        return "int"
+    if all(_as_number(o, float) is not None for o in options):
+        return "float"
+    return "text"
+
+
+def check_combo(value, choices, value_type, class_name):
+    """Return the choice converted to its type, or refuse the run."""
+    options = parse_choices(choices, class_name)
+    if value not in options:
+        raise MarkerContractError(f"{class_name}: {value!r} is not one of the choices {options}.")
+    if value_type not in COMBO_VALUE_TYPES:
+        raise MarkerContractError(f"{class_name}: unknown value_type {value_type!r}.")
+    kind = combo_value_type(options, value_type)
+    if kind == "text":
+        return value
+    converted = _as_number(value, int if kind == "int" else float)
+    if converted is None:
+        raise MarkerContractError(f"{class_name}: {value!r} is not a valid {kind}.")
+    return converted
+
+
 class WWAIExposeCombo:
     CATEGORY = INPUT_CATEGORY
     FUNCTION = "expose"
@@ -444,26 +485,36 @@ class WWAIExposeCombo:
                 ),
                 **metadata_widgets(),
                 **required_widget(),
-            }
+            },
+            # Optional, so it comes after `required` in widgets_values and a
+            # workflow saved before it existed still loads, as "auto".
+            "optional": {
+                "value_type": (
+                    list(COMBO_VALUE_TYPES),
+                    {
+                        "default": "auto",
+                        "tooltip": (
+                            "What the target dropdown holds. auto: int if every choice is a whole "
+                            "number, float if every choice is a number, text otherwise. Pick text "
+                            "if a dropdown lists numbers as text."
+                        ),
+                    },
+                ),
+            },
         }
 
     @classmethod
-    def VALIDATE_INPUTS(cls, value, choices, name, description, required):
+    def VALIDATE_INPUTS(cls, value, choices, name, description, required, value_type="auto"):
         try:
-            options = parse_choices(choices, cls.__name__)
+            check_combo(value, choices, value_type, cls.__name__)
         except MarkerContractError as exc:
             return str(exc)
-        if value not in options:
-            return f"{cls.__name__}: {value!r} is not one of the choices {options}."
         return True
 
-    def expose(self, value, choices, name, description, required):
+    def expose(self, value, choices, name, description, required, value_type="auto"):
         class_name = type(self).__name__
         require_marker_name(name, class_name)
-        options = parse_choices(choices, class_name)
-        if value not in options:
-            raise MarkerContractError(f"{class_name}: {value!r} is not one of the choices {options}.")
-        return (value,)
+        return (check_combo(value, choices, value_type, class_name),)
 
 
 class WWAIExposeImage(FileMarkerMixin):
