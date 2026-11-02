@@ -1,0 +1,298 @@
+{
+ "valid": [
+  {
+   "name": "one point",
+   "state": {
+    "source": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "frame": 0,
+    "items": [
+     {
+      "kind": "point",
+      "mode": "include",
+      "x": 10,
+      "y": 20
+     }
+    ]
+   },
+   "canonical": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"frame\":0,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":10,\"y\":20}]}",
+   "outputs": {
+    "include_points": "[{\"x\": 10, \"y\": 20}]",
+    "exclude_points": "[]",
+    "include_boxes": [],
+    "exclude_boxes": [],
+    "frame": 0
+   }
+  },
+  {
+   "name": "box only",
+   "state": {
+    "source": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "frame": 3,
+    "items": [
+     {
+      "kind": "box",
+      "mode": "include",
+      "x": 1,
+      "y": 2,
+      "width": 30,
+      "height": 40
+     }
+    ]
+   },
+   "canonical": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"frame\":3,\"items\":[{\"kind\":\"box\",\"mode\":\"include\",\"x\":1,\"y\":2,\"width\":30,\"height\":40}]}",
+   "outputs": {
+    "include_points": "[]",
+    "exclude_points": "[]",
+    "include_boxes": [
+     {
+      "x": 1,
+      "y": 2,
+      "width": 30,
+      "height": 40
+     }
+    ],
+    "exclude_boxes": [],
+    "frame": 3
+   }
+  },
+  {
+   "name": "include and exclude mix",
+   "state": {
+    "source": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "frame": 0,
+    "items": [
+     {
+      "kind": "point",
+      "mode": "include",
+      "x": 1,
+      "y": 2
+     },
+     {
+      "kind": "point",
+      "mode": "exclude",
+      "x": 3,
+      "y": 4
+     },
+     {
+      "kind": "box",
+      "mode": "include",
+      "x": 5,
+      "y": 6,
+      "width": 7,
+      "height": 8
+     },
+     {
+      "kind": "box",
+      "mode": "exclude",
+      "x": 9,
+      "y": 10,
+      "width": 11,
+      "height": 12
+     }
+    ]
+   },
+   "canonical": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"frame\":0,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":2},{\"kind\":\"point\",\"mode\":\"exclude\",\"x\":3,\"y\":4},{\"kind\":\"box\",\"mode\":\"include\",\"x\":5,\"y\":6,\"width\":7,\"height\":8},{\"kind\":\"box\",\"mode\":\"exclude\",\"x\":9,\"y\":10,\"width\":11,\"height\":12}]}",
+   "outputs": {
+    "include_points": "[{\"x\": 1, \"y\": 2}]",
+    "exclude_points": "[{\"x\": 3, \"y\": 4}]",
+    "include_boxes": [
+     {
+      "x": 5,
+      "y": 6,
+      "width": 7,
+      "height": 8
+     }
+    ],
+    "exclude_boxes": [
+     {
+      "x": 9,
+      "y": 10,
+      "width": 11,
+      "height": 12
+     }
+    ],
+    "frame": 0
+   }
+  },
+  {
+   "name": "order kept within each kind",
+   "state": {
+    "source": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "frame": 0,
+    "items": [
+     {
+      "kind": "point",
+      "mode": "include",
+      "x": 3,
+      "y": 3
+     },
+     {
+      "kind": "box",
+      "mode": "include",
+      "x": 1,
+      "y": 1,
+      "width": 1,
+      "height": 1
+     },
+     {
+      "kind": "point",
+      "mode": "include",
+      "x": 1,
+      "y": 1
+     },
+     {
+      "kind": "point",
+      "mode": "exclude",
+      "x": 2,
+      "y": 2
+     },
+     {
+      "kind": "box",
+      "mode": "include",
+      "x": 2,
+      "y": 2,
+      "width": 2,
+      "height": 2
+     },
+     {
+      "kind": "point",
+      "mode": "include",
+      "x": 2,
+      "y": 2
+     }
+    ]
+   },
+   "canonical": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"frame\":0,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":3,\"y\":3},{\"kind\":\"box\",\"mode\":\"include\",\"x\":1,\"y\":1,\"width\":1,\"height\":1},{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1},{\"kind\":\"point\",\"mode\":\"exclude\",\"x\":2,\"y\":2},{\"kind\":\"box\",\"mode\":\"include\",\"x\":2,\"y\":2,\"width\":2,\"height\":2},{\"kind\":\"point\",\"mode\":\"include\",\"x\":2,\"y\":2}]}",
+   "outputs": {
+    "include_points": "[{\"x\": 3, \"y\": 3}, {\"x\": 1, \"y\": 1}, {\"x\": 2, \"y\": 2}]",
+    "exclude_points": "[{\"x\": 2, \"y\": 2}]",
+    "include_boxes": [
+     {
+      "x": 1,
+      "y": 1,
+      "width": 1,
+      "height": 1
+     },
+     {
+      "x": 2,
+      "y": 2,
+      "width": 2,
+      "height": 2
+     }
+    ],
+    "exclude_boxes": [],
+    "frame": 0
+   }
+  },
+  {
+   "name": "integer-valued float accepted",
+   "state": {
+    "source": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "frame": 2.0,
+    "items": [
+     {
+      "kind": "point",
+      "mode": "include",
+      "x": 10.0,
+      "y": 20.0
+     }
+    ]
+   },
+   "canonical": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"frame\":2,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":10,\"y\":20}]}",
+   "outputs": {
+    "include_points": "[{\"x\": 10, \"y\": 20}]",
+    "exclude_points": "[]",
+    "include_boxes": [],
+    "exclude_boxes": [],
+    "frame": 2
+   }
+  }
+ ],
+ "invalid": [
+  {
+   "name": "fractional pixel",
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"frame\":0,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1.5,\"y\":2}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID"
+  },
+  {
+   "name": "fractional frame",
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"frame\":1.5,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":2}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID"
+  },
+  {
+   "name": "bool as number",
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"frame\":0,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":true,\"y\":2}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID"
+  },
+  {
+   "name": "bool as frame",
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"frame\":true,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":2}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID"
+  },
+  {
+   "name": "unknown top-level key",
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"frame\":0,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":2}],\"extra\":1}",
+   "refusal": "COMFYUI_CLICKS_INVALID"
+  },
+  {
+   "name": "unknown item key",
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"frame\":0,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":2,\"extra\":1}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID"
+  },
+  {
+   "name": "empty items",
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"frame\":0,\"items\":[]}",
+   "refusal": "COMFYUI_CLICKS_INVALID"
+  },
+  {
+   "name": "non-hex source",
+   "state": "{\"source\":\"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\",\"frame\":0,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":2}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID"
+  },
+  {
+   "name": "upper-case source",
+   "state": "{\"source\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"frame\":0,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":2}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID"
+  },
+  {
+   "name": "short source",
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"frame\":0,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":2}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID"
+  },
+  {
+   "name": "negative frame",
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"frame\":-1,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":2}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID"
+  },
+  {
+   "name": "bad mode",
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"frame\":0,\"items\":[{\"kind\":\"point\",\"mode\":\"maybe\",\"x\":1,\"y\":2}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID"
+  },
+  {
+   "name": "bad kind",
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"frame\":0,\"items\":[{\"kind\":\"line\",\"mode\":\"include\",\"x\":1,\"y\":2}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID"
+  },
+  {
+   "name": "zero-width box",
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"frame\":0,\"items\":[{\"kind\":\"box\",\"mode\":\"include\",\"x\":1,\"y\":2,\"width\":0,\"height\":5}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID"
+  },
+  {
+   "name": "missing key",
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":2}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID"
+  },
+  {
+   "name": "not json",
+   "state": "not json",
+   "refusal": "COMFYUI_CLICKS_INVALID"
+  },
+  {
+   "name": "not an object",
+   "state": "[1,2]",
+   "refusal": "COMFYUI_CLICKS_INVALID"
+  }
+ ]
+}

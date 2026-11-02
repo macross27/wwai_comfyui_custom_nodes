@@ -39,6 +39,7 @@ from .wwai_markers_core import (
     is_staged_name,
     require_marker_name,
     require_single,
+    split_clicks,
 )
 
 logger = logging.getLogger(__name__)
@@ -332,6 +333,28 @@ class WWAIExposeText:
     def expose(self, value, name, description, required):
         require_marker_name(name, type(self).__name__)
         return (value,)
+
+
+class WWAIExposeClicks:
+    CATEGORY = INPUT_CATEGORY
+    FUNCTION = "expose"
+    RETURN_TYPES = ("STRING", "STRING", "BOUNDING_BOX", "BOUNDING_BOX", "INT")
+    RETURN_NAMES = ("include_points", "exclude_points", "include_boxes", "exclude_boxes", "frame")
+    DESCRIPTION = "Marks the artist's clicks (points and boxes) as controllable from WWAI."
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "value": ("STRING", {"multiline": True, "default": ""}),
+                **metadata_widgets(),
+                **required_widget(),
+            }
+        }
+
+    def expose(self, value, name, description, required):
+        require_marker_name(name, type(self).__name__)
+        return split_clicks(value)
 
 
 class WWAIExposeInt:
@@ -955,6 +978,7 @@ class WWAIExposeOutputMesh(AlwaysRerunMixin):
 
 NODE_CLASS_MAPPINGS = {
     "WWAIExposeText": WWAIExposeText,
+    "WWAIExposeClicks": WWAIExposeClicks,
     "WWAIExposeInt": WWAIExposeInt,
     "WWAIExposeFloat": WWAIExposeFloat,
     "WWAIExposeBool": WWAIExposeBool,
@@ -965,6 +989,7 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "WWAIExposeText": "WWAI Expose Text",
+    "WWAIExposeClicks": "WWAI Expose Clicks",
     "WWAIExposeInt": "WWAI Expose Int",
     "WWAIExposeFloat": "WWAI Expose Float",
     "WWAIExposeBool": "WWAI Expose Bool",
