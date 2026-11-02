@@ -228,6 +228,47 @@ def _save_3d_stub():
     return parent, mod
 
 
+class _Routes:
+    def __init__(self):
+        self.handlers = {}
+
+    def post(self, path):
+        def register(handler):
+            self.handlers[path] = handler
+            return handler
+
+        return register
+
+
+class _PromptQueue:
+    """Upstream ``PromptQueue.get_current_queue()``: ``(running, pending)``."""
+
+    def __init__(self):
+        self.current = ([], [])
+        self.error = None
+
+    def get_current_queue(self):
+        if self.error is not None:
+            raise self.error
+        return self.current
+
+
+def _server_stub():
+    mod = types.ModuleType("server")
+    mod.PromptServer = types.SimpleNamespace(
+        instance=types.SimpleNamespace(routes=_Routes(), prompt_queue=_PromptQueue())
+    )
+    return mod
+
+
+def _aiohttp_stub():
+    web = types.ModuleType("aiohttp.web")
+    web.json_response = lambda body, status=200: (status, body)
+    parent = types.ModuleType("aiohttp")
+    parent.web = web
+    return parent, web
+
+
 def setUpModule():
     global _TMP, _IN, _OUT, nodes, MarkerContractError
     _TMP = tempfile.mkdtemp()
@@ -238,7 +279,11 @@ def setUpModule():
 
     comfy_api, comfy_api_latest = _comfy_api_stub()
     comfy_extras, save_3d = _save_3d_stub()
+    aiohttp, aiohttp_web = _aiohttp_stub()
     stubs = {
+        "server": _server_stub(),
+        "aiohttp": aiohttp,
+        "aiohttp.web": aiohttp_web,
         "torch": _torch_stub(),
         "torchaudio": _torchaudio_stub(),
         "folder_paths": _folder_paths_stub(),
@@ -349,7 +394,10 @@ class SignatureContractTest(unittest.TestCase):
         for name, cls in nodes.NODE_CLASS_MAPPINGS.items():
             if not hasattr(cls, "IS_CHANGED"):
                 continue
-            accepted = set(inspect.signature(cls.IS_CHANGED).parameters)
+            params = inspect.signature(cls.IS_CHANGED).parameters
+            if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+                continue  # **kwargs takes every widget
+            accepted = set(params)
             required = set(cls.INPUT_TYPES()["required"])
             missing = required - accepted
             self.assertFalse(missing, f"{name}.IS_CHANGED does not accept {missing}")
@@ -684,6 +732,114 @@ class OutputMarkerTest(unittest.TestCase):
             with self.assertRaises(MarkerContractError, msg=name):
                 nodes.NODE_CLASS_MAPPINGS[name]().expose(name="", description="", **kwargs)
 
+
+
+class StagedFileUseTest(unittest.TestCase):
+    """A staged name whose bytes do not match is refused at use (D3)."""
+
+    def _stage(self, ext, data=b"abc"):
+        import hashlib
+
+        os.makedirs(os.path.join(_IN, "wwai"), exist_ok=True)
+        hexd = hashlib.sha256(b"abc").hexdigest()
+        rel = f"wwai/wwai-{hexd}.{ext}"
+        with open(os.path.join(_IN, rel), "wb") as handle:
+            handle.write(data)
+        return rel
+
+    def test_each_file_marker_refuses_mismatched_bytes(self):
+        for cls, ext in (
+            (nodes.WWAIExposeImage, "png"), (nodes.WWAIExposeVideo, "mp4"),
+            (nodes.WWAIExposeAudio, "flac"), (nodes.WWAIExposeMesh, "glb"),
+        ):
+            rel = self._stage(ext, b"not-abc")
+            with self.assertRaises(MarkerContractError) as ctx:
+                cls().expose(file=rel, name="n", description="", required=True)
+            self.assertIn("WWAI_STAGED_FILE_UNUSABLE", str(ctx.exception), cls.__name__)
+            self.assertFalse(os.path.exists(os.path.join(_IN, rel)))
+
+    def test_validate_inputs_passes_a_missing_staged_name(self):
+        rel = "wwai/wwai-" + "a" * 64 + ".png"
+        self.assertIs(nodes.WWAIExposeImage.VALIDATE_INPUTS(rel, "n", "", True), True)
+
+    def test_validate_inputs_still_refuses_a_missing_author_file(self):
+        self.assertIn("input file not found", nodes.WWAIExposeImage.VALIDATE_INPUTS("nope.png", "n", "", True))
+
+
+class OutputMarkerCachingTest(unittest.TestCase):
+    """An output marker must never be served from ComfyUI's cache: a cached one
+    reports an old output file the sweeper may have deleted."""
+
+    def test_every_output_marker_always_reruns(self):
+        import math
+
+        outputs = [cls for cls in nodes.NODE_CLASS_MAPPINGS.values() if getattr(cls, "OUTPUT_NODE", False)]
+        self.assertEqual(len(outputs), 4)
+        for cls in outputs:
+            first = cls.IS_CHANGED(value=None, name="n", description="")
+            self.assertTrue(math.isnan(first), cls.__name__)
+            self.assertNotEqual(first, cls.IS_CHANGED(value=None, name="n", description=""), cls.__name__)
+
+
+class StagedFilesRouteTest(unittest.TestCase):
+    """The delete door reads upstream's queue shape and refuses when it cannot."""
+
+    HEX = "a" * 64
+
+    def setUp(self):
+        import importlib
+
+        package = os.path.basename(os.path.dirname(os.path.abspath(__file__)))
+        self.route = importlib.import_module(f"{package}.staged_files_route")
+        self.queue = self.route.PromptServer.instance.prompt_queue
+        self.addCleanup(setattr, self.queue, "current", ([], []))
+        self.addCleanup(setattr, self.queue, "error", None)
+        secret_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, secret_dir)
+        self.secret = "s" * 40
+        secret_path = os.path.join(secret_dir, "secret")
+        with open(secret_path, "w") as handle:
+            handle.write(self.secret)
+        original = self.route.SECRET_PATH
+        self.route.SECRET_PATH = secret_path
+        self.addCleanup(setattr, self.route, "SECRET_PATH", original)
+
+    def _item(self, number, value):
+        prompt = {"1": {"class_type": "WWAIExposeImage", "inputs": {"file": value, "name": "x"}}}
+        return (number, f"p{number}", prompt, {}, ["1"], {})
+
+    def _post(self, filename):
+        import asyncio
+
+        async def body():
+            return {"filename": filename}
+
+        request = types.SimpleNamespace(
+            json=body, headers={"X-WWAI-Staged-File-Secret": self.secret}
+        )
+        handler = self.route.PromptServer.instance.routes.handlers["/wwai/staged-file/delete"]
+        self.assertIs(handler, self.route.delete_staged_file)
+        return asyncio.run(handler(request))
+
+    def test_running_and_pending_values_are_read(self):
+        running = f"wwai/wwai-{self.HEX}.png"
+        pending = f"wwai/wwai-{'b' * 64}.png"
+        self.queue.current = ([self._item(1, running)], [self._item(2, pending)])
+        values = self.route.queued_input_values()
+        self.assertIn(running, values)
+        self.assertIn(pending, values)
+        self.assertIn("x", values)
+
+    def test_annotated_pending_value_is_in_use(self):
+        self.queue.current = ([], [self._item(2, f"wwai/wwai-{self.HEX}.png [input]")])
+        self.assertEqual(self._post(f"wwai-{self.HEX}.png"), (409, {"wwai_staged_file": "in_use"}))
+
+    def test_unreadable_queue_is_a_typed_refusal(self):
+        self.queue.error = RuntimeError("queue locked")
+        self.assertEqual(
+            self._post(f"wwai-{self.HEX}.png"),
+            (500, {"wwai_staged_file": "failed", "detail": "cannot read the prompt queue: queue locked"}),
+        )
 
 if __name__ == "__main__":
     unittest.main()

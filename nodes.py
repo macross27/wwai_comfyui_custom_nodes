@@ -33,8 +33,10 @@ from PIL.PngImagePlugin import PngInfo
 
 from .wwai_markers_core import (
     MarkerContractError,
+    check_staged_file,
     copy_file_verbatim,
     extension_of,
+    is_staged_name,
     require_marker_name,
     require_single,
 )
@@ -78,7 +80,12 @@ except ImportError as exc:  # pragma: no cover - depends on the ComfyUI host
 # sRGB/HLG -> scene-linear EXR conversion and the AVIF colour tagging are
 # colour-science that must match what core writes, not a second opinion.
 try:
-    from comfy_extras.nodes_images import _encode_image, _save_avif, inject_exr_metadata, inject_png_metadata
+    from comfy_extras.nodes_images import (
+        _encode_image,
+        _save_avif,
+        inject_exr_metadata,
+        inject_png_metadata,
+    )
 
     IMAGE_ENCODER_IMPORT_ERROR = None
 except ImportError as exc:  # pragma: no cover - depends on the ComfyUI host
@@ -287,12 +294,16 @@ class FileMarkerMixin:
         if _is_no_file(file):
             return NO_FILE
         path = folder_paths.get_annotated_filepath(file)
+        if not os.path.exists(path):
+            check_staged_file(path, file)  # staged name: raises the typed 'missing'
         return os.path.getmtime(path), os.path.getsize(path)
 
     @classmethod
     def VALIDATE_INPUTS(cls, file, name, description, required):
         if _is_no_file(file):
             return True
+        if is_staged_name(file):
+            return True  # missing/damaged is handled at run time (D3)
         if not folder_paths.exists_annotated_filepath(file):
             return f"{cls.__name__}: input file not found: {file}"
         return True
@@ -543,6 +554,7 @@ class WWAIExposeImage(FileMarkerMixin):
         if _is_no_file(file):
             return (None, None)
         path = folder_paths.get_annotated_filepath(file)
+        check_staged_file(path, file)
         if extension_of(path, "") == "exr":
             return load_exr(path)
         img = ImageOps.exif_transpose(Image.open(path))
@@ -597,6 +609,7 @@ class WWAIExposeVideo(FileMarkerMixin):
         if _is_no_file(file):
             return (None, None, None, 0.0)
         path = folder_paths.get_annotated_filepath(file)
+        check_staged_file(path, file)
         video = InputImpl.VideoFromFile(path)
         components = video.get_components()
         # audio is None when the file carries no sound track — the same thing
@@ -631,6 +644,7 @@ class WWAIExposeAudio(FileMarkerMixin):
         if _is_no_file(file):
             return (None,)
         path = folder_paths.get_annotated_filepath(file)
+        check_staged_file(path, file)
         waveform, sample_rate = torchaudio.load(path)
         return ({"waveform": waveform.unsqueeze(0), "sample_rate": sample_rate},)
 
@@ -661,13 +675,29 @@ class WWAIExposeMesh(FileMarkerMixin):
         if _is_no_file(file):
             return (None,)
         path = folder_paths.get_annotated_filepath(file)
+        check_staged_file(path, file)
         return (Types.File3D(path),)
 
 
 # --- output markers ---------------------------------------------------------
 
 
-class WWAIExposeOutputImage:
+class AlwaysRerunMixin:
+    """Output markers re-execute on every prompt.
+
+    Staged input markers report the file's sha as their IS_CHANGED, so an
+    identical rerun can be served wholly from ComfyUI's cache. A cached output
+    marker would report the file it saved last time, which WWAI's sweeper may
+    already have deleted; NaN never equals itself, so this node always runs
+    (it only re-saves).
+    """
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
+
+
+class WWAIExposeOutputImage(AlwaysRerunMixin):
     CATEGORY = OUTPUT_CATEGORY
     FUNCTION = "expose"
     RETURN_TYPES = ()
@@ -773,7 +803,7 @@ class WWAIExposeOutputImage:
         return wwai_result(entry)
 
 
-class WWAIExposeOutputVideo:
+class WWAIExposeOutputVideo(AlwaysRerunMixin):
     """Saves the finished video, from either of ComfyUI's two video worlds.
 
     ComfyUI core passes a finished VIDEO object around (MiniMax and every other
@@ -835,7 +865,7 @@ class WWAIExposeOutputVideo:
         return wwai_result(entry)
 
 
-class WWAIExposeOutputAudio:
+class WWAIExposeOutputAudio(AlwaysRerunMixin):
     CATEGORY = OUTPUT_CATEGORY
     FUNCTION = "expose"
     RETURN_TYPES = ()
@@ -864,7 +894,7 @@ class WWAIExposeOutputAudio:
         return wwai_result(dict(entry))
 
 
-class WWAIExposeOutputMesh:
+class WWAIExposeOutputMesh(AlwaysRerunMixin):
     CATEGORY = OUTPUT_CATEGORY
     FUNCTION = "expose"
     RETURN_TYPES = ()

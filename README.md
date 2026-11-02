@@ -180,6 +180,41 @@ never parsed as a mesh, which would keep the `.ply` extension and throw the
 splat attributes away. The same holds for `.splat`, `.spz`, `.ksplat` and
 point-cloud `.ply`.
 
+## Staged-file delete door
+
+WWAI stores each artist file once under `input/wwai/wwai-<sha256>.<ext>` and
+removes it after it has gone unused for a set time. Removal goes through
+`POST /wwai/staged-file/delete` with body `{"filename": "wwai-<sha256>.<ext>"}`
+(or upstream's renamed copy, `wwai-<sha256> (N).<ext>`) and header
+`X-WWAI-Staged-File-Secret`. ComfyUI itself is unauthenticated, so the secret
+keeps this from being a second open delete door. The folder is fixed to
+`input/wwai`; author files in the input root are never touched.
+
+Operator steps:
+
+1. Create the secret file in this add-on folder, at least 32 characters:
+   `openssl rand -hex 32 > .wwai_staged_file_secret` (gitignored, read on every
+   request, so no ComfyUI restart is needed for a change). On the Windows GPU
+   host use PowerShell and write plain ASCII:
+   `$b = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); ($b | ForEach-Object { $_.ToString('x2') }) -join '' | Set-Content -Encoding ascii -NoNewline .wwai_staged_file_secret`
+   (UTF-8 with a BOM and UTF-16, as PowerShell's `>` writes, are read too).
+2. Put the same value in WWAI's `COMFYUI_STAGED_FILE_DELETE_SECRET`.
+3. Restart ComfyUI once so the route is registered.
+
+Answers (the body is `{"wwai_staged_file": "<word>"}`): 200 `deleted`, 404
+`absent`, 403 `forbidden` (wrong secret), 503 `not_configured` (no secret file
+or under 32 characters), 400 `refused` (not a staged name), 400 `not_regular` (not a regular
+file, or `input/wwai` is a link or not a folder), 409 `in_use` (a queued or
+running prompt names the file), 500 `failed` (also when the prompt queue
+cannot be read: nothing is deleted then). A Windows junction counts as a link.
+On platforms without `dir_fd` (Windows) the folder check and the delete are two
+steps; swapping the folder between them needs write access to the machine's
+disk, which can already delete these files — a deliberate limit.
+
+A staged file that is missing or whose bytes do not match its name makes the
+marker fail with `WWAI_STAGED_FILE_UNUSABLE: wwai/wwai-<sha>.<ext> (<missing|mismatch>)`
+(a mismatching file is removed), so WWAI stages a fresh copy.
+
 ## Tests
 
 ```
