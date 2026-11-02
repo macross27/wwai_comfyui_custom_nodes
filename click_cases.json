@@ -293,6 +293,16 @@
    "name": "not an object",
    "state": "[1,2]",
    "refusal": "COMFYUI_CLICKS_INVALID"
+  },
+  {
+   "name": "kind is a list",
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"frame\":0,\"items\":[{\"kind\":[\"point\"],\"mode\":\"include\",\"x\":1,\"y\":2}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID"
+  },
+  {
+   "name": "mode is a list",
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"frame\":0,\"items\":[{\"kind\":\"point\",\"mode\":[\"include\"],\"x\":1,\"y\":2}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID"
   }
  ]
 }

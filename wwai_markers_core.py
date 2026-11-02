@@ -310,11 +310,11 @@ def split_clicks(text):
     points = {"include": [], "exclude": []}
     boxes = {"include": [], "exclude": []}
     for item in items:
-        if not isinstance(item, dict) or item.get("kind") not in _ITEM_KEYS:
+        if not isinstance(item, dict) or not isinstance(item.get("kind"), str) or item["kind"] not in _ITEM_KEYS:
             raise MarkerContractError(f"{CLICKS_INVALID}: each item must have kind point or box")
         if set(item) != _ITEM_KEYS[item["kind"]]:
             raise MarkerContractError(f"{CLICKS_INVALID}: a {item['kind']} item has the wrong keys")
-        if item["mode"] not in points:
+        if not isinstance(item["mode"], str) or item["mode"] not in points:
             raise MarkerContractError(f"{CLICKS_INVALID}: mode must be include or exclude")
         x = _click_int(item["x"], "x")
         y = _click_int(item["y"], "y")
