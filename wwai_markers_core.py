@@ -9,6 +9,7 @@ therefore unit-testable on a bare Python, with no ComfyUI installed.
 
 import hashlib
 import hmac
+import json
 import os
 import re
 import shutil
@@ -257,3 +258,79 @@ def staged_file_delete(
         return _delete_entry(answer, filename, dir_fd=fd)
     finally:
         os.close(fd)
+
+
+# --- clicks -----------------------------------------------------------------
+
+CLICKS_INVALID = "COMFYUI_CLICKS_INVALID"
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+_ITEM_KEYS = {
+    "point": {"kind", "mode", "x", "y"},
+    "box": {"kind", "mode", "x", "y", "width", "height"},
+}
+
+
+def _click_int(value, what, minimum=None):
+    """An int, or an integer-valued float (as WWAI's _coerce_int accepts)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise MarkerContractError(f"{CLICKS_INVALID}: {what} must be a whole number")
+    if isinstance(value, float):
+        if not value.is_integer():
+            raise MarkerContractError(f"{CLICKS_INVALID}: {what} must be a whole number")
+        value = int(value)
+    if minimum is not None and value < minimum:
+        raise MarkerContractError(f"{CLICKS_INVALID}: {what} must be at least {minimum}")
+    return value
+
+
+def split_clicks(text):
+    """Validate a WWAI click state (JSON text) and split it into five outputs.
+
+    Returns (include_points, exclude_points, include_boxes, exclude_boxes,
+    frame): points as JSON text of [{"x","y"}], boxes as lists of
+    {x, y, width, height}, each kind in the artist's order. Same grammar as
+    WWAI's _coerce_clicks, without its item-count cap.
+    """
+    if not isinstance(text, str):
+        raise MarkerContractError(f"{CLICKS_INVALID}: the click state must be text")
+    try:
+        state = json.loads(text)
+    except (ValueError, RecursionError):
+        raise MarkerContractError(f"{CLICKS_INVALID}: the click state is not valid JSON") from None
+    if not isinstance(state, dict) or set(state) != {"source", "frame", "items"}:
+        raise MarkerContractError(
+            f"{CLICKS_INVALID}: the click state must be an object with exactly source, frame and items"
+        )
+    if not isinstance(state["source"], str) or not _HEX64.fullmatch(state["source"]):
+        raise MarkerContractError(f"{CLICKS_INVALID}: source must be 64 lower-case hex characters")
+    frame = _click_int(state["frame"], "frame", 0)
+    items = state["items"]
+    if not isinstance(items, list) or not items:
+        raise MarkerContractError(f"{CLICKS_INVALID}: items must be a non-empty list")
+    points = {"include": [], "exclude": []}
+    boxes = {"include": [], "exclude": []}
+    for item in items:
+        if not isinstance(item, dict) or not isinstance(item.get("kind"), str) or item["kind"] not in _ITEM_KEYS:
+            raise MarkerContractError(f"{CLICKS_INVALID}: each item must have kind point or box")
+        if set(item) != _ITEM_KEYS[item["kind"]]:
+            raise MarkerContractError(f"{CLICKS_INVALID}: a {item['kind']} item has the wrong keys")
+        if not isinstance(item["mode"], str) or item["mode"] not in points:
+            raise MarkerContractError(f"{CLICKS_INVALID}: mode must be include or exclude")
+        x = _click_int(item["x"], "x")
+        y = _click_int(item["y"], "y")
+        if item["kind"] == "point":
+            points[item["mode"]].append({"x": x, "y": y})
+        else:
+            boxes[item["mode"]].append({
+                "x": x,
+                "y": y,
+                "width": _click_int(item["width"], "width", 1),
+                "height": _click_int(item["height"], "height", 1),
+            })
+    return (
+        json.dumps(points["include"]),
+        json.dumps(points["exclude"]),
+        boxes["include"],
+        boxes["exclude"],
+        frame,
+    )

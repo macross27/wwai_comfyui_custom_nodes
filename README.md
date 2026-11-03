@@ -35,6 +35,7 @@ media markers and `value` on the scalar ones; WWAI rewrites exactly that key.
 | Node | Emits |
 |---|---|
 | WWAI Expose Text | `STRING` |
+| WWAI Expose Clicks | `include_points`, `exclude_points` (`STRING` JSON `[{"x","y"}]`), `include_boxes`, `exclude_boxes` (`BOUNDING_BOX`), `frame` (`INT`) — see below |
 | WWAI Expose Int | `INT` |
 | WWAI Expose Float | `FLOAT` |
 | WWAI Expose Bool | `BOOLEAN` |
@@ -179,6 +180,20 @@ Output Mesh** and it is copied byte-for-byte with its container intact —
 never parsed as a mesh, which would keep the `.ply` extension and throw the
 splat attributes away. The same holds for `.splat`, `.spz`, `.ksplat` and
 point-cloud `.ply`.
+
+### WWAI Expose Clicks
+
+WWAI fills `value` with the artist's clicks as JSON text; the node validates it
+and splits it. Paste this into `value` to try it (`source` is the sha256 of the
+picture the clicks were made on):
+
+```
+{"source":"0000000000000000000000000000000000000000000000000000000000000000","frame":0,"items":[{"kind":"point","mode":"include","x":120,"y":80},{"kind":"box","mode":"exclude","x":10,"y":10,"width":50,"height":40}]}
+```
+
+An empty value, bad JSON, unknown keys, fractional pixels or an empty `items`
+list fail the run with `COMFYUI_CLICKS_INVALID`. The shared test rows are in
+`click_cases.json`.
 
 ## Staged-file delete door
 

@@ -337,7 +337,7 @@ def _written(entry):
 
 
 ALL_NODES = {
-    "WWAIExposeText", "WWAIExposeInt", "WWAIExposeFloat", "WWAIExposeBool", "WWAIExposeCombo", "WWAIExposeImage",
+    "WWAIExposeText", "WWAIExposeClicks", "WWAIExposeInt", "WWAIExposeFloat", "WWAIExposeBool", "WWAIExposeCombo", "WWAIExposeImage",
     "WWAIExposeAudio", "WWAIExposeVideo", "WWAIExposeMesh",
     "WWAIExposeOutputImage", "WWAIExposeOutputAudio",
     "WWAIExposeOutputVideo", "WWAIExposeOutputMesh",
@@ -353,6 +353,14 @@ def _audio(channels=2, batch=1):
 
 
 class RegistrationTest(unittest.TestCase):
+    def test_clicks_node_shape(self):
+        value = nodes.WWAIExposeClicks.INPUT_TYPES()["required"]["value"]
+        self.assertEqual(value[0], "STRING")
+        self.assertEqual(value[1]["default"], "")
+        self.assertEqual(
+            nodes.WWAIExposeClicks.RETURN_TYPES, ("STRING", "STRING", "BOUNDING_BOX", "BOUNDING_BOX", "INT")
+        )
+
     def test_every_node_registers_with_a_display_name(self):
         self.assertEqual(set(nodes.NODE_CLASS_MAPPINGS), ALL_NODES)
         self.assertEqual(set(nodes.NODE_DISPLAY_NAME_MAPPINGS), ALL_NODES)
