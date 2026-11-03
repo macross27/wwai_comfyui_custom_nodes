@@ -449,14 +449,14 @@ class StagedFileDeleteTest(unittest.TestCase):
         self.assertFalse(os.path.exists(file_path))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class SplitClicksTest(unittest.TestCase):
     """Every row of click_cases.json; WWAI runs the same rows through its own coercer."""
 
-    CASES = json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "click_cases.json"), encoding="utf-8"))
+    with open(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "click_cases.json"),
+        encoding="utf-8",
+    ) as _cases_file:
+        CASES = json.load(_cases_file)
 
     def test_valid_rows(self):
         for row in self.CASES["valid"]:
@@ -480,3 +480,7 @@ class SplitClicksTest(unittest.TestCase):
     def test_non_text_is_refused(self):
         with self.assertRaises(MarkerContractError):
             split_clicks({"source": "a" * 64, "frame": 0, "items": []})
+
+
+if __name__ == "__main__":
+    unittest.main()
