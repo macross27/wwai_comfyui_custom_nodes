@@ -146,6 +146,7 @@ FILENAME_PREFIX = "wwai/WWAI"
 
 INPUT_CATEGORY = "WWAI/Expose"
 OUTPUT_CATEGORY = "WWAI/Expose Output"
+UTILITY_CATEGORY = "WWAI/Utility"
 
 # Sentinel choice on every file-based input marker's dropdown that means "this
 # optional reference has no data for this run." It is always the first entry
@@ -974,6 +975,28 @@ class WWAIExposeOutputMesh(AlwaysRerunMixin):
         return wwai_result(entry)
 
 
+class WWAIRefuseBlankMask:
+    """Not a marker (no WWAIExpose prefix): fails a mask run that found nothing."""
+
+    CATEGORY = UTILITY_CATEGORY
+    FUNCTION = "expose"
+    RETURN_TYPES = (IMAGE_TYPE,)
+    RETURN_NAMES = ("images",)
+    DESCRIPTION = "Fails the run when the mask is entirely black instead of saving an empty file."
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"images": (IMAGE_TYPE,)}}
+
+    def expose(self, images):
+        # Whole batch: a video with some blank frames and some masked frames passes.
+        if images.max() <= 0:
+            raise MarkerContractError(
+                "WWAI_NOTHING_FOUND: The prompt found nothing in this file. Try other words."
+            )
+        return (images,)
+
+
 # --- registration -----------------------------------------------------------
 
 NODE_CLASS_MAPPINGS = {
@@ -985,6 +1008,7 @@ NODE_CLASS_MAPPINGS = {
     "WWAIExposeCombo": WWAIExposeCombo,
     "WWAIExposeImage": WWAIExposeImage,
     "WWAIExposeOutputImage": WWAIExposeOutputImage,
+    "WWAIRefuseBlankMask": WWAIRefuseBlankMask,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -996,6 +1020,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WWAIExposeCombo": "WWAI Expose Combo",
     "WWAIExposeImage": "WWAI Expose Image",
     "WWAIExposeOutputImage": "WWAI Expose Output Image",
+    "WWAIRefuseBlankMask": "WWAI Refuse Blank Mask",
 }
 
 # The video and 3D markers need payload classes an older ComfyUI does not

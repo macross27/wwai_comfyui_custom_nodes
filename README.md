@@ -195,6 +195,13 @@ An empty value, bad JSON, unknown keys, fractional pixels or an empty `items`
 list fail the run with `COMFYUI_CLICKS_INVALID`. The shared test rows are in
 `click_cases.json`.
 
+Utility — category `WWAI/Utility`. Not a marker (no `WWAIExpose` prefix, no
+`name`/`description` widgets).
+
+| Node | Does |
+|---|---|
+| WWAI Refuse Blank Mask | Takes `images`, returns them unchanged. If every pixel of the whole batch is zero it fails with `WWAI_NOTHING_FOUND: The prompt found nothing in this file. Try other words.` instead of letting a mask run save an all-black file. |
+
 ## Staged-file delete door
 
 WWAI stores each artist file once under `input/wwai/wwai-<sha256>.<ext>` and

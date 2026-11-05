@@ -341,7 +341,11 @@ ALL_NODES = {
     "WWAIExposeAudio", "WWAIExposeVideo", "WWAIExposeMesh",
     "WWAIExposeOutputImage", "WWAIExposeOutputAudio",
     "WWAIExposeOutputVideo", "WWAIExposeOutputMesh",
+    "WWAIRefuseBlankMask",
 }
+# Utility nodes WWAI does not treat as markers (no WWAIExpose prefix): they
+# carry no name/description/required widgets.
+NON_MARKER_NODES = {"WWAIRefuseBlankMask"}
 OUTPUT_NODES = {
     "WWAIExposeOutputImage", "WWAIExposeOutputAudio",
     "WWAIExposeOutputVideo", "WWAIExposeOutputMesh",
@@ -367,15 +371,22 @@ class RegistrationTest(unittest.TestCase):
 
     def test_every_node_declares_name_and_description_widgets(self):
         for name, cls in nodes.NODE_CLASS_MAPPINGS.items():
+            if name in NON_MARKER_NODES:
+                continue
             required = cls.INPUT_TYPES()["required"]
             self.assertIn("name", required, name)
             self.assertIn("description", required, name)
 
     def test_every_input_marker_declares_a_required_toggle(self):
-        for name in ALL_NODES - OUTPUT_NODES:
+        for name in ALL_NODES - OUTPUT_NODES - NON_MARKER_NODES:
             widget = nodes.NODE_CLASS_MAPPINGS[name].INPUT_TYPES()["required"]["required"]
             self.assertEqual(widget[0], "BOOLEAN", name)
             self.assertIs(widget[1]["default"], True, name)
+
+    def test_non_markers_do_not_use_the_marker_prefix(self):
+        for name in NON_MARKER_NODES:
+            self.assertFalse(name.startswith("WWAIExpose"), name)
+            self.assertEqual(nodes.NODE_DISPLAY_NAME_MAPPINGS[name], "WWAI Refuse Blank Mask")
 
     def test_no_output_marker_declares_a_required_toggle(self):
         for name in OUTPUT_NODES:
@@ -740,6 +751,30 @@ class OutputMarkerTest(unittest.TestCase):
             with self.assertRaises(MarkerContractError, msg=name):
                 nodes.NODE_CLASS_MAPPINGS[name]().expose(name="", description="", **kwargs)
 
+
+
+class RefuseBlankMaskTest(unittest.TestCase):
+    def test_passes_a_batch_with_one_lit_pixel_in_one_frame(self):
+        frames = _Tensor(np.zeros((3, 4, 4, 3), dtype=np.float32))
+        frames[2, 1, 1, 0] = 1.0
+        (out,) = nodes.WWAIRefuseBlankMask().expose(frames)
+        self.assertIs(out, frames)
+
+    def test_refuses_an_all_zero_batch_with_the_exact_message(self):
+        frames = _Tensor(np.zeros((2, 4, 4, 3), dtype=np.float32))
+        with self.assertRaises(MarkerContractError) as caught:
+            nodes.WWAIRefuseBlankMask().expose(frames)
+        self.assertEqual(
+            str(caught.exception),
+            "WWAI_NOTHING_FOUND: The prompt found nothing in this file. Try other words.",
+        )
+
+    def test_is_a_plain_non_output_image_node(self):
+        cls = nodes.WWAIRefuseBlankMask
+        self.assertEqual(cls.RETURN_TYPES, ("IMAGE",))
+        self.assertEqual(cls.RETURN_NAMES, ("images",))
+        self.assertEqual(cls.INPUT_TYPES(), {"required": {"images": ("IMAGE",)}})
+        self.assertFalse(getattr(cls, "OUTPUT_NODE", False))
 
 
 class StagedFileUseTest(unittest.TestCase):
