@@ -394,6 +394,9 @@ def parse_keyframes(text):
             split_items(entry["items"])
         except MarkerContractError as exc:
             raise _keyframes_invalid("malformed", str(exc).split(": ", 1)[1]) from None
+        if any(item["kind"] == "box" and item["mode"] == "exclude" for item in entry["items"]):
+            # SAM3_Detect takes no exclude box; refuse rather than drop it.
+            raise _keyframes_invalid("exclude_box_unsupported", f"object {obj} at frame {frame} has an exclude box")
         if (frame, obj) in seen:
             raise _keyframes_invalid("repeated_keyframe", f"object {obj} has two keyframes at frame {frame}")
         seen.add((frame, obj))

@@ -230,7 +230,9 @@ SAM3 work, with `COMFYUI_CLICKS_INVALID: <reason>: ...`: `malformed`,
 `in_after_out`, `repeated_keyframe` (same frame and object twice),
 `frame_outside_clip`, `range_outside_clip`, `picture_frame_not_zero`,
 `prompt_keyframe_without_prompt`, `click_object_without_clicks`,
-`nothing_to_track` (no prompt, no clicks), `empty_clip`. There are no count
+`nothing_to_track` (no prompt, no clicks), `empty_clip`,
+`exclude_box_unsupported` (SAM3 takes no exclude box; the one-frame clicks
+marker still accepts them). There are no count
 limits here; WWAI caps size and tracking work.
 
 For each layer, every output frame takes the track from its nearest keyframe

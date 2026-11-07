@@ -315,9 +315,19 @@ def load_image_file(file):
 
 def load_video_file(file):
     """A movie file as (VIDEO, IMAGE frames, AUDIO or None, frame rate as a
-    Fraction). Staged-file refusals included."""
+    Fraction). Staged-file refusals included. A file with no video stream
+    or no frame rate is refused: upstream's VideoFromFile would read it at
+    1 fps, and the mask movie would come back at the wrong rate."""
     path = folder_paths.get_annotated_filepath(file)
     check_staged_file(path, file)
+    try:
+        with av.open(path) as container:
+            streams = container.streams.video
+            rate = streams[0].average_rate if streams else None
+    except av.error.FFmpegError as exc:
+        raise MarkerContractError(f"WWAI_VIDEO_UNREADABLE: {file} cannot be opened as a movie ({exc})") from exc
+    if not rate:
+        raise MarkerContractError(f"WWAI_VIDEO_NO_FRAME_RATE: {file} has no video stream with a frame rate")
     video = InputImpl.VideoFromFile(path)
     components = video.get_components()
     # audio is None when the file carries no sound track — the same thing
@@ -732,13 +742,14 @@ class WWAIExposeImageOrVideo(FileMarkerMixin):
         require_marker_name(name, class_name)
         if _is_no_file(file):
             return (None, None)
-        if folder_paths.filter_files_content_types([unannotated(file)], ["video"]):
-            _, images, _, frame_rate = load_video_file(file)
-            return (images, {"kind": "video", "fps": frame_rate})
         if folder_paths.filter_files_content_types([unannotated(file)], ["image"]):
             image, _ = load_image_file(file)
             return (image, {"kind": "image", "fps": None})
-        raise MarkerContractError(f"{class_name}: {file} is neither a picture nor a movie.")
+        # Anything else goes to the movie loader WWAIExposeVideo uses, which
+        # refuses by name what it cannot read (an .mxf is application/mxf to
+        # mimetypes, yet a movie to both inputs).
+        _, images, _, frame_rate = load_video_file(file)
+        return (images, {"kind": "video", "fps": frame_rate})
 
 
 class WWAIExposeAudio(FileMarkerMixin):
@@ -1135,8 +1146,10 @@ class WWAIRefuseBlankMask:
 # the others (the prompt layer's detect + track is ~0.3 s of a warm click).
 # Keyed by every input the layer reads; the frames, model and clip are matched
 # by identity through weak references, so a freed object never matches.
-# ponytail: 8 entries, one-frame runs only (one mask each); a multi-frame
-# Track is never cached, so memory stays at 8 masks.
+# Each mask is stored as its own copy, never a view into the track's whole
+# batch, and the frames' in-place counter is part of the key.
+# ponytail: 8 entries, one-frame runs only (one copied mask each); a
+# multi-frame Track is never cached, so memory stays at 8 masks.
 _LAYER_CACHE_SIZE = 8
 _LAYER_CACHE = OrderedDict()
 
@@ -1211,7 +1224,7 @@ class WWAIRotoTrack:
             if first != last:
                 layer = run()
             else:
-                key = (obj == 0, prompt if obj == 0 else None, json.dumps(spans), settings, detect)
+                key = (obj == 0, prompt if obj == 0 else None, json.dumps(spans), settings, detect, frames._version)
                 layer = _cached_layer(key, (frames, model, clip), run)
             for frame, mask in layer.items():
                 union[frame] = mask if frame not in union else torch.maximum(union[frame], mask)
@@ -1254,7 +1267,7 @@ def _cached_layer(key, objects, run):
     if hit is not None and all(ref() is obj for ref, obj in zip(hit[0], objects)):
         _LAYER_CACHE.move_to_end(key)
         return hit[1]
-    layer = run()
+    layer = {frame: mask.clone() for frame, mask in run().items()}
     _LAYER_CACHE[key] = ([weakref.ref(obj) for obj in objects], layer)
     _LAYER_CACHE.move_to_end(key)
     while len(_LAYER_CACHE) > _LAYER_CACHE_SIZE:

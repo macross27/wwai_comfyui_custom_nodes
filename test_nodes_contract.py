@@ -58,6 +58,18 @@ class _Tensor(np.ndarray):
     def numel(self):
         return self.size
 
+    # torch's in-place counter; real torch bumps it itself, tests bump it by hand.
+    _version = 0
+
+    def clone(self):
+        return _Tensor(np.array(self))
+
+    def untyped_storage(self):
+        owner = self
+        while isinstance(owner.base, np.ndarray):
+            owner = owner.base
+        return types.SimpleNamespace(nbytes=lambda: owner.nbytes)
+
 
 def _torch_stub():
     mod = types.ModuleType("torch")
@@ -383,12 +395,26 @@ def setUpModule():
     ).MarkerContractError
 
     Image.new("RGBA", (8, 6), (10, 20, 30, 255)).save(os.path.join(_IN, "shot.png"))
-    with open(os.path.join(_IN, "clip.mp4"), "wb") as handle:
-        handle.write(b"fake")
+    _tiny_movie(os.path.join(_IN, "clip.mp4"))
+    shutil.copy(os.path.join(_IN, "clip.mp4"), os.path.join(_IN, "clip.mxf"))
     with open(os.path.join(_IN, "track.flac"), "wb") as handle:
         handle.write(b"fLaC")
     with open(os.path.join(_IN, "splat.ply"), "wb") as handle:
         handle.write(_splat_ply())
+
+
+def _tiny_movie(path, rate=24):
+    """A real two-frame movie, so the frame-rate check reads a real file."""
+    with av.open(path, "w", format="mp4") as container:
+        stream = container.add_stream("mpeg4", rate=rate)
+        stream.width = stream.height = 16
+        stream.pix_fmt = "yuv420p"
+        for _ in range(2):
+            frame = av.VideoFrame.from_ndarray(np.zeros((16, 16, 3), np.uint8), format="rgb24")
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
 
 
 def tearDownModule():
@@ -1106,6 +1132,19 @@ class RotoLayerCacheTest(unittest.TestCase):
                 self._click(**{name: value})
                 self.assertTrue(self._prompt_layer_ran())
 
+    def test_a_cached_mask_holds_only_its_own_frame(self):
+        nodes._LAYER_CACHE.clear()
+        _track(self.frames, _keys([(0, 1)], (6, 6)), keep_cache=True)  # tracked over 7 frames
+        for _, layer in nodes._LAYER_CACHE.values():
+            for mask in layer.values():
+                self.assertEqual(mask.untyped_storage().nbytes(), mask.nbytes)
+
+    def test_frames_changed_in_place_run_it_again(self):
+        self.frames[80] += 0  # an in-place edit; torch bumps _version, the stub needs a hand
+        self.frames._version = 1
+        self._click()
+        self.assertTrue(self._prompt_layer_ran())
+
     def test_a_multi_frame_run_is_never_cached(self):
         keys = _keys([(80, 0, "empty")], (78, 80))
         _track(self.frames, keys, "bench", keep_cache=True)
@@ -1157,6 +1196,29 @@ class ImageOrVideoTest(unittest.TestCase):
         np.testing.assert_array_equal(images, frames)
         self.assertEqual(info, {"kind": "video", "fps": Fraction(24, 1)})
         self.assertEqual(float(info["fps"]), fps)
+
+    def test_an_mxf_movie_is_a_movie_for_both_inputs(self):
+        images, info = nodes.WWAIExposeImageOrVideo().expose("clip.mxf", "src", "", True)
+        self.assertEqual(info["kind"], "video")
+        nodes.WWAIExposeVideo().expose("clip.mxf", "src", "", True)
+
+    def test_a_movie_with_no_frame_rate_is_refused_by_both_inputs(self):
+        from unittest import mock
+
+        class _NoRate:
+            streams = types.SimpleNamespace(video=[types.SimpleNamespace(average_rate=None)])
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        with mock.patch.object(nodes.av, "open", lambda path: _NoRate()):
+            for node in (nodes.WWAIExposeImageOrVideo(), nodes.WWAIExposeVideo()):
+                with self.assertRaises(MarkerContractError) as caught:
+                    node.expose("clip.mp4", "src", "", True)
+                self.assertIn("WWAI_VIDEO_NO_FRAME_RATE", str(caught.exception), type(node).__name__)
 
     def test_a_file_that_is_neither_is_refused(self):
         with self.assertRaises(MarkerContractError):

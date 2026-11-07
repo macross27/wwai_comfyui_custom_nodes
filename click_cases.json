@@ -487,6 +487,14 @@
    "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":0,\"object\":1,\"items\":[{\"kind\":\"lasso\",\"mode\":\"include\",\"x\":1,\"y\":1}]}]}",
    "refusal": "COMFYUI_CLICKS_INVALID",
    "reason": "malformed"
+  },
+  {
+   "name": "an exclude box on a keyframe",
+   "frame_count": 100,
+   "prompt_set": false,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":0,\"object\":1,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1},{\"kind\":\"box\",\"mode\":\"exclude\",\"x\":0,\"y\":0,\"width\":3,\"height\":3}]}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID",
+   "reason": "exclude_box_unsupported"
   }
  ],
  "tracked_frames": [

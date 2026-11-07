@@ -481,6 +481,11 @@ class SplitClicksTest(unittest.TestCase):
                     split_clicks(row["state"])
                 self.assertIn(row["refusal"], str(caught.exception))
 
+    def test_an_exclude_box_stays_accepted_on_one_frame(self):
+        state = json.dumps({"source": "a" * 64, "frame": 0, "items": [
+            {"kind": "box", "mode": "exclude", "x": 1, "y": 1, "width": 2, "height": 2}]})
+        self.assertEqual(split_clicks(state)[3], [{"x": 1, "y": 1, "width": 2, "height": 2}])
+
     def test_non_text_is_refused(self):
         with self.assertRaises(MarkerContractError):
             split_clicks({"source": "a" * 64, "frame": 0, "items": []})
@@ -516,7 +521,7 @@ class KeyframesTest(unittest.TestCase):
             {
                 "malformed", "in_after_out", "repeated_keyframe", "frame_outside_clip",
                 "range_outside_clip", "picture_frame_not_zero", "prompt_keyframe_without_prompt",
-                "nothing_to_track", "click_object_without_clicks", "empty_clip",
+                "nothing_to_track", "click_object_without_clicks", "empty_clip", "exclude_box_unsupported",
             },
         )
 
