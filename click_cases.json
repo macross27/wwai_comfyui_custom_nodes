@@ -304,5 +304,247 @@
    "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"frame\":0,\"items\":[{\"kind\":\"point\",\"mode\":[\"include\"],\"x\":1,\"y\":2}]}",
    "refusal": "COMFYUI_CLICKS_INVALID"
   }
+ ],
+ "keyframes_valid": [
+  {
+   "name": "prompt only",
+   "frame_count": 10,
+   "prompt_set": true,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[]}"
+  },
+  {
+   "name": "300 items in one keyframe",
+   "frame_count": 10,
+   "prompt_set": false,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":0,\"object\":1,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":0,\"y\":0},{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1},{\"kind\":\"point\",\"mode\":\"include\",\"x\":2,\"y\":2},{\"kind\":\"point\",\"mode\":\"include\",\"x\":3,\"y\":3},{\"kind\":\"point\",\"mode\":\"include\",\"x\":4,\"y\":4},{\"kind\":\"point\",\"mode\":\"include\",\"x\":5,\"y\":5},{\"kind\":\"point\",\"mode\":\"include\",\"x\":6,\"y\":6},{\"kind\":\"point\",\"mode\":\"include\",\"x\":7,\"y\":7},{\"kind\":\"point\",\"mode\":\"include\",\"x\":8,\"y\":8},{\"kind\":\"point\",\"mode\":\"include\",\"x\":9,\"y\":9},{\"kind\":\"point\",\"mode\":\"include\",\"x\":10,\"y\":10},{\"kind\":\"point\",\"mode\":\"include\",\"x\":11,\"y\":11},{\"kind\":\"point\",\"mode\":\"include\",\"x\":12,\"y\":12},{\"kind\":\"point\",\"mode\":\"include\",\"x\":13,\"y\":13},{\"kind\":\"point\",\"mode\":\"include\",\"x\":14,\"y\":14},{\"kind\":\"point\",\"mode\":\"include\",\"x\":15,\"y\":15},{\"kind\":\"point\",\"mode\":\"include\",\"x\":16,\"y\":16},{\"kind\":\"point\",\"mode\":\"include\",\"x\":17,\"y\":17},{\"kind\":\"point\",\"mode\":\"include\",\"x\":18,\"y\":18},{\"kind\":\"point\",\"mode\":\"include\",\"x\":19,\"y\":19},{\"kind\":\"point\",\"mode\":\"include\",\"x\":20,\"y\":20},{\"kind\":\"point\",\"mode\":\"include\",\"x\":21,\"y\":21},{\"kind\":\"point\",\"mode\":\"include\",\"x\":22,\"y\":22},{\"kind\":\"point\",\"mode\":\"include\",\"x\":23,\"y\":23},{\"kind\":\"point\",\"mode\":\"include\",\"x\":24,\"y\":24},{\"kind\":\"point\",\"mode\":\"include\",\"x\":25,\"y\":25},{\"kind\":\"point\",\"mode\":\"include\",\"x\":26,\"y\":26},{\"kind\":\"point\",\"mode\":\"include\",\"x\":27,\"y\":27},{\"kind\":\"point\",\"mode\":\"include\",\"x\":28,\"y\":28},{\"kind\":\"point\",\"mode\":\"include\",\"x\":29,\"y\":29},{\"kind\":\"point\",\"mode\":\"include\",\"x\":30,\"y\":30},{\"kind\":\"point\",\"mode\":\"include\",\"x\":31,\"y\":31},{\"kind\":\"point\",\"mode\":\"include\",\"x\":32,\"y\":32},{\"kind\":\"point\",\"mode\":\"include\",\"x\":33,\"y\":33},{\"kind\":\"point\",\"mode\":\"include\",\"x\":34,\"y\":34},{\"kind\":\"point\",\"mode\":\"include\",\"x\":35,\"y\":35},{\"kind\":\"point\",\"mode\":\"include\",\"x\":36,\"y\":36},{\"kind\":\"point\",\"mode\":\"include\",\"x\":37,\"y\":37},{\"kind\":\"point\",\"mode\":\"include\",\"x\":38,\"y\":38},{\"kind\":\"point\",\"mode\":\"include\",\"x\":39,\"y\":39},{\"kind\":\"point\",\"mode\":\"include\",\"x\":40,\"y\":40},{\"kind\":\"point\",\"mode\":\"include\",\"x\":41,\"y\":41},{\"kind\":\"point\",\"mode\":\"include\",\"x\":42,\"y\":42},{\"kind\":\"point\",\"mode\":\"include\",\"x\":43,\"y\":43},{\"kind\":\"point\",\"mode\":\"include\",\"x\":44,\"y\":44},{\"kind\":\"point\",\"mode\":\"include\",\"x\":45,\"y\":45},{\"kind\":\"point\",\"mode\":\"include\",\"x\":46,\"y\":46},{\"kind\":\"point\",\"mode\":\"include\",\"x\":47,\"y\":47},{\"kind\":\"point\",\"mode\":\"include\",\"x\":48,\"y\":48},{\"kind\":\"point\",\"mode\":\"include\",\"x\":49,\"y\":49},{\"kind\":\"point\",\"mode\":\"include\",\"x\":50,\"y\":50},{\"kind\":\"point\",\"mode\":\"include\",\"x\":51,\"y\":51},{\"kind\":\"point\",\"mode\":\"include\",\"x\":52,\"y\":52},{\"kind\":\"point\",\"mode\":\"include\",\"x\":53,\"y\":53},{\"kind\":\"point\",\"mode\":\"include\",\"x\":54,\"y\":54},{\"kind\":\"point\",\"mode\":\"include\",\"x\":55,\"y\":55},{\"kind\":\"point\",\"mode\":\"include\",\"x\":56,\"y\":56},{\"kind\":\"point\",\"mode\":\"include\",\"x\":57,\"y\":57},{\"kind\":\"point\",\"mode\":\"include\",\"x\":58,\"y\":58},{\"kind\":\"point\",\"mode\":\"include\",\"x\":59,\"y\":59},{\"kind\":\"point\",\"mode\":\"include\",\"x\":60,\"y\":60},{\"kind\":\"point\",\"mode\":\"include\",\"x\":61,\"y\":61},{\"kind\":\"point\",\"mode\":\"include\",\"x\":62,\"y\":62},{\"kind\":\"point\",\"mode\":\"include\",\"x\":63,\"y\":63},{\"kind\":\"point\",\"mode\":\"include\",\"x\":64,\"y\":64},{\"kind\":\"point\",\"mode\":\"include\",\"x\":65,\"y\":65},{\"kind\":\"point\",\"mode\":\"include\",\"x\":66,\"y\":66},{\"kind\":\"point\",\"mode\":\"include\",\"x\":67,\"y\":67},{\"kind\":\"point\",\"mode\":\"include\",\"x\":68,\"y\":68},{\"kind\":\"point\",\"mode\":\"include\",\"x\":69,\"y\":69},{\"kind\":\"point\",\"mode\":\"include\",\"x\":70,\"y\":70},{\"kind\":\"point\",\"mode\":\"include\",\"x\":71,\"y\":71},{\"kind\":\"point\",\"mode\":\"include\",\"x\":72,\"y\":72},{\"kind\":\"point\",\"mode\":\"include\",\"x\":73,\"y\":73},{\"kind\":\"point\",\"mode\":\"include\",\"x\":74,\"y\":74},{\"kind\":\"point\",\"mode\":\"include\",\"x\":75,\"y\":75},{\"kind\":\"point\",\"mode\":\"include\",\"x\":76,\"y\":76},{\"kind\":\"point\",\"mode\":\"include\",\"x\":77,\"y\":77},{\"kind\":\"point\",\"mode\":\"include\",\"x\":78,\"y\":78},{\"kind\":\"point\",\"mode\":\"include\",\"x\":79,\"y\":79},{\"kind\":\"point\",\"mode\":\"include\",\"x\":80,\"y\":80},{\"kind\":\"point\",\"mode\":\"include\",\"x\":81,\"y\":81},{\"kind\":\"point\",\"mode\":\"include\",\"x\":82,\"y\":82},{\"kind\":\"point\",\"mode\":\"include\",\"x\":83,\"y\":83},{\"kind\":\"point\",\"mode\":\"include\",\"x\":84,\"y\":84},{\"kind\":\"point\",\"mode\":\"include\",\"x\":85,\"y\":85},{\"kind\":\"point\",\"mode\":\"include\",\"x\":86,\"y\":86},{\"kind\":\"point\",\"mode\":\"include\",\"x\":87,\"y\":87},{\"kind\":\"point\",\"mode\":\"include\",\"x\":88,\"y\":88},{\"kind\":\"point\",\"mode\":\"include\",\"x\":89,\"y\":89},{\"kind\":\"point\",\"mode\":\"include\",\"x\":90,\"y\":90},{\"kind\":\"point\",\"mode\":\"include\",\"x\":91,\"y\":91},{\"kind\":\"point\",\"mode\":\"include\",\"x\":92,\"y\":92},{\"kind\":\"point\",\"mode\":\"include\",\"x\":93,\"y\":93},{\"kind\":\"point\",\"mode\":\"include\",\"x\":94,\"y\":94},{\"kind\":\"point\",\"mode\":\"include\",\"x\":95,\"y\":95},{\"kind\":\"point\",\"mode\":\"include\",\"x\":96,\"y\":96},{\"kind\":\"point\",\"mode\":\"include\",\"x\":97,\"y\":97},{\"kind\":\"point\",\"mode\":\"include\",\"x\":98,\"y\":98},{\"kind\":\"point\",\"mode\":\"include\",\"x\":99,\"y\":99},{\"kind\":\"point\",\"mode\":\"include\",\"x\":100,\"y\":100},{\"kind\":\"point\",\"mode\":\"include\",\"x\":101,\"y\":101},{\"kind\":\"point\",\"mode\":\"include\",\"x\":102,\"y\":102},{\"kind\":\"point\",\"mode\":\"include\",\"x\":103,\"y\":103},{\"kind\":\"point\",\"mode\":\"include\",\"x\":104,\"y\":104},{\"kind\":\"point\",\"mode\":\"include\",\"x\":105,\"y\":105},{\"kind\":\"point\",\"mode\":\"include\",\"x\":106,\"y\":106},{\"kind\":\"point\",\"mode\":\"include\",\"x\":107,\"y\":107},{\"kind\":\"point\",\"mode\":\"include\",\"x\":108,\"y\":108},{\"kind\":\"point\",\"mode\":\"include\",\"x\":109,\"y\":109},{\"kind\":\"point\",\"mode\":\"include\",\"x\":110,\"y\":110},{\"kind\":\"point\",\"mode\":\"include\",\"x\":111,\"y\":111},{\"kind\":\"point\",\"mode\":\"include\",\"x\":112,\"y\":112},{\"kind\":\"point\",\"mode\":\"include\",\"x\":113,\"y\":113},{\"kind\":\"point\",\"mode\":\"include\",\"x\":114,\"y\":114},{\"kind\":\"point\",\"mode\":\"include\",\"x\":115,\"y\":115},{\"kind\":\"point\",\"mode\":\"include\",\"x\":116,\"y\":116},{\"kind\":\"point\",\"mode\":\"include\",\"x\":117,\"y\":117},{\"kind\":\"point\",\"mode\":\"include\",\"x\":118,\"y\":118},{\"kind\":\"point\",\"mode\":\"include\",\"x\":119,\"y\":119},{\"kind\":\"point\",\"mode\":\"include\",\"x\":120,\"y\":120},{\"kind\":\"point\",\"mode\":\"include\",\"x\":121,\"y\":121},{\"kind\":\"point\",\"mode\":\"include\",\"x\":122,\"y\":122},{\"kind\":\"point\",\"mode\":\"include\",\"x\":123,\"y\":123},{\"kind\":\"point\",\"mode\":\"include\",\"x\":124,\"y\":124},{\"kind\":\"point\",\"mode\":\"include\",\"x\":125,\"y\":125},{\"kind\":\"point\",\"mode\":\"include\",\"x\":126,\"y\":126},{\"kind\":\"point\",\"mode\":\"include\",\"x\":127,\"y\":127},{\"kind\":\"point\",\"mode\":\"include\",\"x\":128,\"y\":128},{\"kind\":\"point\",\"mode\":\"include\",\"x\":129,\"y\":129},{\"kind\":\"point\",\"mode\":\"include\",\"x\":130,\"y\":130},{\"kind\":\"point\",\"mode\":\"include\",\"x\":131,\"y\":131},{\"kind\":\"point\",\"mode\":\"include\",\"x\":132,\"y\":132},{\"kind\":\"point\",\"mode\":\"include\",\"x\":133,\"y\":133},{\"kind\":\"point\",\"mode\":\"include\",\"x\":134,\"y\":134},{\"kind\":\"point\",\"mode\":\"include\",\"x\":135,\"y\":135},{\"kind\":\"point\",\"mode\":\"include\",\"x\":136,\"y\":136},{\"kind\":\"point\",\"mode\":\"include\",\"x\":137,\"y\":137},{\"kind\":\"point\",\"mode\":\"include\",\"x\":138,\"y\":138},{\"kind\":\"point\",\"mode\":\"include\",\"x\":139,\"y\":139},{\"kind\":\"point\",\"mode\":\"include\",\"x\":140,\"y\":140},{\"kind\":\"point\",\"mode\":\"include\",\"x\":141,\"y\":141},{\"kind\":\"point\",\"mode\":\"include\",\"x\":142,\"y\":142},{\"kind\":\"point\",\"mode\":\"include\",\"x\":143,\"y\":143},{\"kind\":\"point\",\"mode\":\"include\",\"x\":144,\"y\":144},{\"kind\":\"point\",\"mode\":\"include\",\"x\":145,\"y\":145},{\"kind\":\"point\",\"mode\":\"include\",\"x\":146,\"y\":146},{\"kind\":\"point\",\"mode\":\"include\",\"x\":147,\"y\":147},{\"kind\":\"point\",\"mode\":\"include\",\"x\":148,\"y\":148},{\"kind\":\"point\",\"mode\":\"include\",\"x\":149,\"y\":149},{\"kind\":\"point\",\"mode\":\"include\",\"x\":150,\"y\":150},{\"kind\":\"point\",\"mode\":\"include\",\"x\":151,\"y\":151},{\"kind\":\"point\",\"mode\":\"include\",\"x\":152,\"y\":152},{\"kind\":\"point\",\"mode\":\"include\",\"x\":153,\"y\":153},{\"kind\":\"point\",\"mode\":\"include\",\"x\":154,\"y\":154},{\"kind\":\"point\",\"mode\":\"include\",\"x\":155,\"y\":155},{\"kind\":\"point\",\"mode\":\"include\",\"x\":156,\"y\":156},{\"kind\":\"point\",\"mode\":\"include\",\"x\":157,\"y\":157},{\"kind\":\"point\",\"mode\":\"include\",\"x\":158,\"y\":158},{\"kind\":\"point\",\"mode\":\"include\",\"x\":159,\"y\":159},{\"kind\":\"point\",\"mode\":\"include\",\"x\":160,\"y\":160},{\"kind\":\"point\",\"mode\":\"include\",\"x\":161,\"y\":161},{\"kind\":\"point\",\"mode\":\"include\",\"x\":162,\"y\":162},{\"kind\":\"point\",\"mode\":\"include\",\"x\":163,\"y\":163},{\"kind\":\"point\",\"mode\":\"include\",\"x\":164,\"y\":164},{\"kind\":\"point\",\"mode\":\"include\",\"x\":165,\"y\":165},{\"kind\":\"point\",\"mode\":\"include\",\"x\":166,\"y\":166},{\"kind\":\"point\",\"mode\":\"include\",\"x\":167,\"y\":167},{\"kind\":\"point\",\"mode\":\"include\",\"x\":168,\"y\":168},{\"kind\":\"point\",\"mode\":\"include\",\"x\":169,\"y\":169},{\"kind\":\"point\",\"mode\":\"include\",\"x\":170,\"y\":170},{\"kind\":\"point\",\"mode\":\"include\",\"x\":171,\"y\":171},{\"kind\":\"point\",\"mode\":\"include\",\"x\":172,\"y\":172},{\"kind\":\"point\",\"mode\":\"include\",\"x\":173,\"y\":173},{\"kind\":\"point\",\"mode\":\"include\",\"x\":174,\"y\":174},{\"kind\":\"point\",\"mode\":\"include\",\"x\":175,\"y\":175},{\"kind\":\"point\",\"mode\":\"include\",\"x\":176,\"y\":176},{\"kind\":\"point\",\"mode\":\"include\",\"x\":177,\"y\":177},{\"kind\":\"point\",\"mode\":\"include\",\"x\":178,\"y\":178},{\"kind\":\"point\",\"mode\":\"include\",\"x\":179,\"y\":179},{\"kind\":\"point\",\"mode\":\"include\",\"x\":180,\"y\":180},{\"kind\":\"point\",\"mode\":\"include\",\"x\":181,\"y\":181},{\"kind\":\"point\",\"mode\":\"include\",\"x\":182,\"y\":182},{\"kind\":\"point\",\"mode\":\"include\",\"x\":183,\"y\":183},{\"kind\":\"point\",\"mode\":\"include\",\"x\":184,\"y\":184},{\"kind\":\"point\",\"mode\":\"include\",\"x\":185,\"y\":185},{\"kind\":\"point\",\"mode\":\"include\",\"x\":186,\"y\":186},{\"kind\":\"point\",\"mode\":\"include\",\"x\":187,\"y\":187},{\"kind\":\"point\",\"mode\":\"include\",\"x\":188,\"y\":188},{\"kind\":\"point\",\"mode\":\"include\",\"x\":189,\"y\":189},{\"kind\":\"point\",\"mode\":\"include\",\"x\":190,\"y\":190},{\"kind\":\"point\",\"mode\":\"include\",\"x\":191,\"y\":191},{\"kind\":\"point\",\"mode\":\"include\",\"x\":192,\"y\":192},{\"kind\":\"point\",\"mode\":\"include\",\"x\":193,\"y\":193},{\"kind\":\"point\",\"mode\":\"include\",\"x\":194,\"y\":194},{\"kind\":\"point\",\"mode\":\"include\",\"x\":195,\"y\":195},{\"kind\":\"point\",\"mode\":\"include\",\"x\":196,\"y\":196},{\"kind\":\"point\",\"mode\":\"include\",\"x\":197,\"y\":197},{\"kind\":\"point\",\"mode\":\"include\",\"x\":198,\"y\":198},{\"kind\":\"point\",\"mode\":\"include\",\"x\":199,\"y\":199},{\"kind\":\"point\",\"mode\":\"include\",\"x\":200,\"y\":200},{\"kind\":\"point\",\"mode\":\"include\",\"x\":201,\"y\":201},{\"kind\":\"point\",\"mode\":\"include\",\"x\":202,\"y\":202},{\"kind\":\"point\",\"mode\":\"include\",\"x\":203,\"y\":203},{\"kind\":\"point\",\"mode\":\"include\",\"x\":204,\"y\":204},{\"kind\":\"point\",\"mode\":\"include\",\"x\":205,\"y\":205},{\"kind\":\"point\",\"mode\":\"include\",\"x\":206,\"y\":206},{\"kind\":\"point\",\"mode\":\"include\",\"x\":207,\"y\":207},{\"kind\":\"point\",\"mode\":\"include\",\"x\":208,\"y\":208},{\"kind\":\"point\",\"mode\":\"include\",\"x\":209,\"y\":209},{\"kind\":\"point\",\"mode\":\"include\",\"x\":210,\"y\":210},{\"kind\":\"point\",\"mode\":\"include\",\"x\":211,\"y\":211},{\"kind\":\"point\",\"mode\":\"include\",\"x\":212,\"y\":212},{\"kind\":\"point\",\"mode\":\"include\",\"x\":213,\"y\":213},{\"kind\":\"point\",\"mode\":\"include\",\"x\":214,\"y\":214},{\"kind\":\"point\",\"mode\":\"include\",\"x\":215,\"y\":215},{\"kind\":\"point\",\"mode\":\"include\",\"x\":216,\"y\":216},{\"kind\":\"point\",\"mode\":\"include\",\"x\":217,\"y\":217},{\"kind\":\"point\",\"mode\":\"include\",\"x\":218,\"y\":218},{\"kind\":\"point\",\"mode\":\"include\",\"x\":219,\"y\":219},{\"kind\":\"point\",\"mode\":\"include\",\"x\":220,\"y\":220},{\"kind\":\"point\",\"mode\":\"include\",\"x\":221,\"y\":221},{\"kind\":\"point\",\"mode\":\"include\",\"x\":222,\"y\":222},{\"kind\":\"point\",\"mode\":\"include\",\"x\":223,\"y\":223},{\"kind\":\"point\",\"mode\":\"include\",\"x\":224,\"y\":224},{\"kind\":\"point\",\"mode\":\"include\",\"x\":225,\"y\":225},{\"kind\":\"point\",\"mode\":\"include\",\"x\":226,\"y\":226},{\"kind\":\"point\",\"mode\":\"include\",\"x\":227,\"y\":227},{\"kind\":\"point\",\"mode\":\"include\",\"x\":228,\"y\":228},{\"kind\":\"point\",\"mode\":\"include\",\"x\":229,\"y\":229},{\"kind\":\"point\",\"mode\":\"include\",\"x\":230,\"y\":230},{\"kind\":\"point\",\"mode\":\"include\",\"x\":231,\"y\":231},{\"kind\":\"point\",\"mode\":\"include\",\"x\":232,\"y\":232},{\"kind\":\"point\",\"mode\":\"include\",\"x\":233,\"y\":233},{\"kind\":\"point\",\"mode\":\"include\",\"x\":234,\"y\":234},{\"kind\":\"point\",\"mode\":\"include\",\"x\":235,\"y\":235},{\"kind\":\"point\",\"mode\":\"include\",\"x\":236,\"y\":236},{\"kind\":\"point\",\"mode\":\"include\",\"x\":237,\"y\":237},{\"kind\":\"point\",\"mode\":\"include\",\"x\":238,\"y\":238},{\"kind\":\"point\",\"mode\":\"include\",\"x\":239,\"y\":239},{\"kind\":\"point\",\"mode\":\"include\",\"x\":240,\"y\":240},{\"kind\":\"point\",\"mode\":\"include\",\"x\":241,\"y\":241},{\"kind\":\"point\",\"mode\":\"include\",\"x\":242,\"y\":242},{\"kind\":\"point\",\"mode\":\"include\",\"x\":243,\"y\":243},{\"kind\":\"point\",\"mode\":\"include\",\"x\":244,\"y\":244},{\"kind\":\"point\",\"mode\":\"include\",\"x\":245,\"y\":245},{\"kind\":\"point\",\"mode\":\"include\",\"x\":246,\"y\":246},{\"kind\":\"point\",\"mode\":\"include\",\"x\":247,\"y\":247},{\"kind\":\"point\",\"mode\":\"include\",\"x\":248,\"y\":248},{\"kind\":\"point\",\"mode\":\"include\",\"x\":249,\"y\":249},{\"kind\":\"point\",\"mode\":\"include\",\"x\":250,\"y\":250},{\"kind\":\"point\",\"mode\":\"include\",\"x\":251,\"y\":251},{\"kind\":\"point\",\"mode\":\"include\",\"x\":252,\"y\":252},{\"kind\":\"point\",\"mode\":\"include\",\"x\":253,\"y\":253},{\"kind\":\"point\",\"mode\":\"include\",\"x\":254,\"y\":254},{\"kind\":\"point\",\"mode\":\"include\",\"x\":255,\"y\":255},{\"kind\":\"point\",\"mode\":\"include\",\"x\":256,\"y\":256},{\"kind\":\"point\",\"mode\":\"include\",\"x\":257,\"y\":257},{\"kind\":\"point\",\"mode\":\"include\",\"x\":258,\"y\":258},{\"kind\":\"point\",\"mode\":\"include\",\"x\":259,\"y\":259},{\"kind\":\"point\",\"mode\":\"include\",\"x\":260,\"y\":260},{\"kind\":\"point\",\"mode\":\"include\",\"x\":261,\"y\":261},{\"kind\":\"point\",\"mode\":\"include\",\"x\":262,\"y\":262},{\"kind\":\"point\",\"mode\":\"include\",\"x\":263,\"y\":263},{\"kind\":\"point\",\"mode\":\"include\",\"x\":264,\"y\":264},{\"kind\":\"point\",\"mode\":\"include\",\"x\":265,\"y\":265},{\"kind\":\"point\",\"mode\":\"include\",\"x\":266,\"y\":266},{\"kind\":\"point\",\"mode\":\"include\",\"x\":267,\"y\":267},{\"kind\":\"point\",\"mode\":\"include\",\"x\":268,\"y\":268},{\"kind\":\"point\",\"mode\":\"include\",\"x\":269,\"y\":269},{\"kind\":\"point\",\"mode\":\"include\",\"x\":270,\"y\":270},{\"kind\":\"point\",\"mode\":\"include\",\"x\":271,\"y\":271},{\"kind\":\"point\",\"mode\":\"include\",\"x\":272,\"y\":272},{\"kind\":\"point\",\"mode\":\"include\",\"x\":273,\"y\":273},{\"kind\":\"point\",\"mode\":\"include\",\"x\":274,\"y\":274},{\"kind\":\"point\",\"mode\":\"include\",\"x\":275,\"y\":275},{\"kind\":\"point\",\"mode\":\"include\",\"x\":276,\"y\":276},{\"kind\":\"point\",\"mode\":\"include\",\"x\":277,\"y\":277},{\"kind\":\"point\",\"mode\":\"include\",\"x\":278,\"y\":278},{\"kind\":\"point\",\"mode\":\"include\",\"x\":279,\"y\":279},{\"kind\":\"point\",\"mode\":\"include\",\"x\":280,\"y\":280},{\"kind\":\"point\",\"mode\":\"include\",\"x\":281,\"y\":281},{\"kind\":\"point\",\"mode\":\"include\",\"x\":282,\"y\":282},{\"kind\":\"point\",\"mode\":\"include\",\"x\":283,\"y\":283},{\"kind\":\"point\",\"mode\":\"include\",\"x\":284,\"y\":284},{\"kind\":\"point\",\"mode\":\"include\",\"x\":285,\"y\":285},{\"kind\":\"point\",\"mode\":\"include\",\"x\":286,\"y\":286},{\"kind\":\"point\",\"mode\":\"include\",\"x\":287,\"y\":287},{\"kind\":\"point\",\"mode\":\"include\",\"x\":288,\"y\":288},{\"kind\":\"point\",\"mode\":\"include\",\"x\":289,\"y\":289},{\"kind\":\"point\",\"mode\":\"include\",\"x\":290,\"y\":290},{\"kind\":\"point\",\"mode\":\"include\",\"x\":291,\"y\":291},{\"kind\":\"point\",\"mode\":\"include\",\"x\":292,\"y\":292},{\"kind\":\"point\",\"mode\":\"include\",\"x\":293,\"y\":293},{\"kind\":\"point\",\"mode\":\"include\",\"x\":294,\"y\":294},{\"kind\":\"point\",\"mode\":\"include\",\"x\":295,\"y\":295},{\"kind\":\"point\",\"mode\":\"include\",\"x\":296,\"y\":296},{\"kind\":\"point\",\"mode\":\"include\",\"x\":297,\"y\":297},{\"kind\":\"point\",\"mode\":\"include\",\"x\":298,\"y\":298},{\"kind\":\"point\",\"mode\":\"include\",\"x\":299,\"y\":299}]}]}"
+  },
+  {
+   "name": "20 objects",
+   "frame_count": 10,
+   "prompt_set": false,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":0,\"object\":1,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]},{\"frame\":0,\"object\":2,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]},{\"frame\":0,\"object\":3,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]},{\"frame\":0,\"object\":4,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]},{\"frame\":0,\"object\":5,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]},{\"frame\":0,\"object\":6,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]},{\"frame\":0,\"object\":7,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]},{\"frame\":0,\"object\":8,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]},{\"frame\":0,\"object\":9,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]},{\"frame\":0,\"object\":10,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]},{\"frame\":0,\"object\":11,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]},{\"frame\":0,\"object\":12,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]},{\"frame\":0,\"object\":13,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]},{\"frame\":0,\"object\":14,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]},{\"frame\":0,\"object\":15,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]},{\"frame\":0,\"object\":16,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]},{\"frame\":0,\"object\":17,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]},{\"frame\":0,\"object\":18,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]},{\"frame\":0,\"object\":19,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]},{\"frame\":0,\"object\":20,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]}]}"
+  },
+  {
+   "name": "prompt keyframe with no clicks",
+   "frame_count": 10,
+   "prompt_set": true,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":0,\"object\":0,\"items\":[]}]}"
+  },
+  {
+   "name": "prompt keyframe with clicks and a box",
+   "frame_count": 10,
+   "prompt_set": true,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":4,\"object\":0,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1},{\"kind\":\"point\",\"mode\":\"exclude\",\"x\":2,\"y\":2},{\"kind\":\"box\",\"mode\":\"include\",\"x\":0,\"y\":0,\"width\":3,\"height\":3}]}],\"range\":{\"in\":0,\"out\":9}}"
+  },
+  {
+   "name": "picture click on frame 0",
+   "frame_count": 1,
+   "prompt_set": false,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":0,\"object\":1,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]}],\"range\":{\"in\":0,\"out\":0}}"
+  }
+ ],
+ "keyframes_invalid": [
+  {
+   "name": "range In 60 after Out 50",
+   "frame_count": 100,
+   "prompt_set": false,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":55,\"object\":1,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]}],\"range\":{\"in\":60,\"out\":50}}",
+   "refusal": "COMFYUI_CLICKS_INVALID",
+   "reason": "in_after_out"
+  },
+  {
+   "name": "two keyframes at frame 10 for object 1",
+   "frame_count": 100,
+   "prompt_set": false,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":10,\"object\":1,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]},{\"frame\":10,\"object\":1,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":2,\"y\":2}]}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID",
+   "reason": "repeated_keyframe"
+  },
+  {
+   "name": "keyframe past the clip",
+   "frame_count": 10,
+   "prompt_set": false,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":10,\"object\":1,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID",
+   "reason": "frame_outside_clip"
+  },
+  {
+   "name": "range past the clip",
+   "frame_count": 10,
+   "prompt_set": false,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":0,\"object\":1,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]}],\"range\":{\"in\":0,\"out\":10}}",
+   "refusal": "COMFYUI_CLICKS_INVALID",
+   "reason": "range_outside_clip"
+  },
+  {
+   "name": "picture keyframe on frame 1",
+   "frame_count": 1,
+   "prompt_set": false,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":1,\"object\":1,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID",
+   "reason": "picture_frame_not_zero"
+  },
+  {
+   "name": "prompt clicks with a blank prompt",
+   "frame_count": 100,
+   "prompt_set": false,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":0,\"object\":0,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID",
+   "reason": "prompt_keyframe_without_prompt"
+  },
+  {
+   "name": "empty prompt keyframe with a blank prompt",
+   "frame_count": 100,
+   "prompt_set": false,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":0,\"object\":0,\"items\":[]},{\"frame\":0,\"object\":1,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID",
+   "reason": "prompt_keyframe_without_prompt"
+  },
+  {
+   "name": "no prompt and no clicks",
+   "frame_count": 100,
+   "prompt_set": false,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[]}",
+   "refusal": "COMFYUI_CLICKS_INVALID",
+   "reason": "nothing_to_track"
+  },
+  {
+   "name": "click object with no clicks",
+   "frame_count": 100,
+   "prompt_set": false,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":0,\"object\":1,\"items\":[]}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID",
+   "reason": "click_object_without_clicks"
+  },
+  {
+   "name": "a clip with no frames",
+   "frame_count": 0,
+   "prompt_set": true,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[]}",
+   "refusal": "COMFYUI_CLICKS_INVALID",
+   "reason": "empty_clip"
+  },
+  {
+   "name": "not JSON",
+   "frame_count": 100,
+   "prompt_set": false,
+   "state": "{",
+   "refusal": "COMFYUI_CLICKS_INVALID",
+   "reason": "malformed"
+  },
+  {
+   "name": "unknown top-level key",
+   "frame_count": 100,
+   "prompt_set": false,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":0,\"object\":1,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]}],\"frame\":0}",
+   "refusal": "COMFYUI_CLICKS_INVALID",
+   "reason": "malformed"
+  },
+  {
+   "name": "range without out",
+   "frame_count": 100,
+   "prompt_set": false,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":0,\"object\":1,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]}],\"range\":{\"in\":0}}",
+   "refusal": "COMFYUI_CLICKS_INVALID",
+   "reason": "malformed"
+  },
+  {
+   "name": "negative frame",
+   "frame_count": 100,
+   "prompt_set": false,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":-1,\"object\":1,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID",
+   "reason": "malformed"
+  },
+  {
+   "name": "fractional object",
+   "frame_count": 100,
+   "prompt_set": false,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":0,\"object\":1.5,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID",
+   "reason": "malformed"
+  },
+  {
+   "name": "keyframes not a list",
+   "frame_count": 100,
+   "prompt_set": false,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":{}}",
+   "refusal": "COMFYUI_CLICKS_INVALID",
+   "reason": "malformed"
+  },
+  {
+   "name": "source not hex",
+   "frame_count": 100,
+   "prompt_set": false,
+   "state": "{\"source\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"keyframes\":[{\"frame\":0,\"object\":1,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID",
+   "reason": "malformed"
+  },
+  {
+   "name": "item of unknown kind",
+   "frame_count": 100,
+   "prompt_set": false,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":0,\"object\":1,\"items\":[{\"kind\":\"lasso\",\"mode\":\"include\",\"x\":1,\"y\":1}]}]}",
+   "refusal": "COMFYUI_CLICKS_INVALID",
+   "reason": "malformed"
+  }
+ ],
+ "tracked_frames": [
+  {
+   "name": "staggered keys over 40-120",
+   "frame_count": 150,
+   "prompt_set": false,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":0,\"object\":1,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]},{\"frame\":100,\"object\":1,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]},{\"frame\":50,\"object\":2,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":2,\"y\":2}]}],\"range\":{\"in\":40,\"out\":120}}",
+   "tracked": 204
+  },
+  {
+   "name": "prompt with no object-0 key over 50-60",
+   "frame_count": 150,
+   "prompt_set": true,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[],\"range\":{\"in\":50,\"out\":60}}",
+   "tracked": 61
+  },
+  {
+   "name": "picture with a prompt and one click",
+   "frame_count": 1,
+   "prompt_set": true,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":0,\"object\":1,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]}]}",
+   "tracked": 2
+  },
+  {
+   "name": "one click mid-clip, whole clip",
+   "frame_count": 10,
+   "prompt_set": false,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":3,\"object\":1,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]}]}",
+   "tracked": 11
+  },
+  {
+   "name": "keyframe no output frame takes is not tracked",
+   "frame_count": 100,
+   "prompt_set": false,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":0,\"object\":1,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]},{\"frame\":90,\"object\":1,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]}],\"range\":{\"in\":0,\"out\":10}}",
+   "tracked": 11
+  },
+  {
+   "name": "one-frame range on its keyframe",
+   "frame_count": 100,
+   "prompt_set": false,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":20,\"object\":1,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]}],\"range\":{\"in\":20,\"out\":20}}",
+   "tracked": 1
+  },
+  {
+   "name": "prompt keyframe at 30 over the whole clip",
+   "frame_count": 100,
+   "prompt_set": true,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":30,\"object\":0,\"items\":[]}]}",
+   "tracked": 101
+  },
+  {
+   "name": "a tie goes to the earlier keyframe",
+   "frame_count": 30,
+   "prompt_set": false,
+   "state": "{\"source\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"keyframes\":[{\"frame\":10,\"object\":1,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]},{\"frame\":20,\"object\":1,\"items\":[{\"kind\":\"point\",\"mode\":\"include\",\"x\":1,\"y\":1}]}],\"range\":{\"in\":15,\"out\":15}}",
+   "tracked": 6
+  }
  ]
 }

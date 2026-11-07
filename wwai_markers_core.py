@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import stat
+from collections import namedtuple
 
 # Containers that carry Gaussian Splat / point-cloud attributes rather than
 # triangle geometry. Round-tripping one of these through a mesh serializer
@@ -307,6 +308,13 @@ def split_clicks(text):
     items = state["items"]
     if not isinstance(items, list) or not items:
         raise MarkerContractError(f"{CLICKS_INVALID}: items must be a non-empty list")
+    return (*split_items(items), frame)
+
+
+def split_items(items):
+    """Validate click items; return (include_points, exclude_points, include_boxes,
+    exclude_boxes): points as JSON text of [{"x","y"}], boxes as lists of
+    {x, y, width, height}, each kind in the artist's order."""
     points = {"include": [], "exclude": []}
     boxes = {"include": [], "exclude": []}
     for item in items:
@@ -332,5 +340,138 @@ def split_clicks(text):
         json.dumps(points["exclude"]),
         boxes["include"],
         boxes["exclude"],
-        frame,
     )
+
+
+# --- keyframes --------------------------------------------------------------
+#
+# The keyframes text: {source, keyframes: [{frame, object, items}], range?: {in, out}}.
+# Object 0 is the prompt's layer (its items refine the prompt and may be empty);
+# objects 1..N are clicks only. range is the frames a run outputs, In <= Out;
+# absent, the whole clip. Grammar only: no count limits (WWAI caps size).
+
+Keyframe = namedtuple("Keyframe", "frame object items")
+# One keyframe's share of a layer: output frames first..last take their mask
+# from the track started at key; calls are the (start, end) SAM3_VideoTrack
+# runs, end < start meaning backward over the reversed frames.
+Span = namedtuple("Span", "key items first last calls")
+
+
+def _keyframes_invalid(reason, detail):
+    return MarkerContractError(f"{CLICKS_INVALID}: {reason}: {detail}")
+
+
+def _whole(value, what):
+    try:
+        return _click_int(value, what, 0)
+    except MarkerContractError as exc:
+        raise _keyframes_invalid("malformed", str(exc).split(": ", 1)[1]) from None
+
+
+def parse_keyframes(text):
+    """The keyframes text as ([Keyframe], (in, out) or None). Refuses malformed
+    text, In after Out and two keyframes with the same frame and object."""
+    if not isinstance(text, str):
+        raise _keyframes_invalid("malformed", "the keyframes state must be text")
+    try:
+        state = json.loads(text)
+    except (ValueError, RecursionError):
+        raise _keyframes_invalid("malformed", "the keyframes state is not valid JSON") from None
+    if not isinstance(state, dict) or not {"source", "keyframes"} <= set(state) <= {"source", "keyframes", "range"}:
+        raise _keyframes_invalid("malformed", "the state must have source, keyframes and an optional range")
+    if not isinstance(state["source"], str) or not _HEX64.fullmatch(state["source"]):
+        raise _keyframes_invalid("malformed", "source must be 64 lower-case hex characters")
+    if not isinstance(state["keyframes"], list):
+        raise _keyframes_invalid("malformed", "keyframes must be a list")
+    keyframes, seen = [], set()
+    for entry in state["keyframes"]:
+        if not isinstance(entry, dict) or set(entry) != {"frame", "object", "items"}:
+            raise _keyframes_invalid("malformed", "each keyframe has exactly frame, object and items")
+        frame, obj = _whole(entry["frame"], "frame"), _whole(entry["object"], "object")
+        if not isinstance(entry["items"], list):
+            raise _keyframes_invalid("malformed", "items must be a list")
+        try:
+            split_items(entry["items"])
+        except MarkerContractError as exc:
+            raise _keyframes_invalid("malformed", str(exc).split(": ", 1)[1]) from None
+        if (frame, obj) in seen:
+            raise _keyframes_invalid("repeated_keyframe", f"object {obj} has two keyframes at frame {frame}")
+        seen.add((frame, obj))
+        keyframes.append(Keyframe(frame, obj, entry["items"]))
+    frame_range = None
+    if "range" in state:
+        rng = state["range"]
+        if not isinstance(rng, dict) or set(rng) != {"in", "out"}:
+            raise _keyframes_invalid("malformed", "range has exactly in and out")
+        frame_range = (_whole(rng["in"], "In"), _whole(rng["out"], "Out"))
+        if frame_range[0] > frame_range[1]:
+            raise _keyframes_invalid("in_after_out", f"In {frame_range[0]} is after Out {frame_range[1]}")
+    return keyframes, frame_range
+
+
+def check_keyframes(parsed, frame_count, prompt_set):
+    """Refuse what parsed keyframes cannot mean on a clip of frame_count frames
+    (a picture: 1) with the prompt set or blank; return (first, last) output frames."""
+    keyframes, frame_range = parsed
+    if frame_count < 1:
+        raise _keyframes_invalid("empty_clip", "the picture or movie has no frames")
+    for kf in keyframes:
+        if kf.frame >= frame_count:
+            if frame_count == 1:
+                raise _keyframes_invalid("picture_frame_not_zero", f"a picture has only frame 0, not {kf.frame}")
+            raise _keyframes_invalid("frame_outside_clip", f"frame {kf.frame} is past the last frame {frame_count - 1}")
+        if kf.object == 0 and not prompt_set:
+            raise _keyframes_invalid("prompt_keyframe_without_prompt", f"object 0 at frame {kf.frame} refines a prompt, and the prompt is blank")
+        if kf.object > 0 and not kf.items:
+            raise _keyframes_invalid("click_object_without_clicks", f"object {kf.object} at frame {kf.frame} has no clicks")
+    if not prompt_set and not keyframes:
+        raise _keyframes_invalid("nothing_to_track", "there is no prompt and no click")
+    if frame_range is None:
+        return 0, frame_count - 1
+    if frame_range[1] >= frame_count:
+        raise _keyframes_invalid("range_outside_clip", f"Out {frame_range[1]} is past the last frame {frame_count - 1}")
+    return frame_range
+
+
+def track_calls(key, first, last):
+    """The SAM3_VideoTrack runs that give frames first..last from a track keyed
+    at key: forward over key..last when last > key, backward over key..first
+    when first < key, one one-frame run when first == last == key."""
+    calls = []
+    if last > key:
+        calls.append((key, last))
+    if first < key:
+        calls.append((key, first))
+    return tuple(calls) or ((key, key),)
+
+
+def _spans(keys, first, last):
+    """Each output frame takes its nearest key (a tie goes to the earlier one);
+    a key that no output frame takes gets no span."""
+    keys = sorted(keys, key=lambda kf: kf[0])
+    owned = {}
+    for frame in range(first, last + 1):
+        best = min(keys, key=lambda kf: (abs(frame - kf[0]), kf[0]))
+        owned.setdefault(best[0], [best[1], frame, frame])[2] = frame
+    return [Span(key, items, lo, hi, track_calls(key, lo, hi)) for key, (items, lo, hi) in sorted(owned.items())]
+
+
+def plan_tracking(text, frame_count, prompt_set):
+    """((first, last), [(object, [Span])]): the layers a run tracks, object 0
+    (the prompt) first when the prompt is set. A prompt with no object-0
+    keyframe is keyed at frame 0 with no clicks (items None)."""
+    parsed = parse_keyframes(text)
+    first, last = check_keyframes(parsed, frame_count, prompt_set)
+    by_object = {}
+    for kf in parsed[0]:
+        by_object.setdefault(kf.object, []).append((kf.frame, kf.items))
+    if prompt_set:
+        by_object.setdefault(0, [(0, None)])
+    layers = [(obj, _spans(keys, first, last)) for obj, keys in sorted(by_object.items())]
+    return (first, last), layers
+
+
+def tracked_frames(text, frame_count, prompt_set):
+    """Frames SAM3_VideoTrack steps through, summed over every run of every layer."""
+    _, layers = plan_tracking(text, frame_count, prompt_set)
+    return sum(abs(end - start) + 1 for _, spans in layers for span in spans for start, end in span.calls)

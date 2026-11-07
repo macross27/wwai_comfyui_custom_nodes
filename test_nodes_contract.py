@@ -55,12 +55,18 @@ class _Tensor(np.ndarray):
     def clamp(self, lo, hi):
         return _Tensor(np.clip(self, lo, hi))
 
+    def numel(self):
+        return self.size
+
 
 def _torch_stub():
     mod = types.ModuleType("torch")
     mod.float32 = np.float32
     mod.from_numpy = _Tensor
     mod.zeros = lambda shape, dtype=None: _Tensor(np.zeros(shape, dtype=dtype or np.float32))
+    mod.flip = lambda tensor, dims: _Tensor(np.flip(tensor, axis=dims))
+    mod.maximum = lambda a, b: _Tensor(np.maximum(a, b))
+    mod.stack = lambda tensors, dim=0: _Tensor(np.stack(tensors, axis=dim))
     return mod
 
 
@@ -228,6 +234,73 @@ def _save_3d_stub():
     return parent, mod
 
 
+class _Sam3:
+    """Stand-in for comfy_extras.nodes_sam3 (ComfyUI b53f77a7), recording every call.
+
+    A frame's pixels hold its clip index, so each call knows which frames it got.
+    Detect paints each include point with (keyframe index + 1); a track hands its
+    initial mask to every frame unless a test sets `track`.
+    """
+
+    calls = []
+    track = None  # (clip frame, track_data) -> (H, W) mask
+
+    @staticmethod
+    def frames(images):
+        return [int(images[i, 0, 0, 0]) for i in range(images.shape[0])]
+
+
+def _sam3_stub():
+    import json
+
+    def node(name, body):
+        @classmethod
+        def execute(cls, **kwargs):
+            _Sam3.calls.append((name, kwargs))
+            return types.SimpleNamespace(args=body(**kwargs))
+
+        return type(name, (), {"execute": execute})
+
+    def detect(model, image, conditioning=None, bboxes=None, positive_coords=None,
+               negative_coords=None, threshold=0.5, refine_iterations=2, individual_masks=False):
+        (frame,) = _Sam3.frames(image)
+        mask = np.zeros((1,) + image.shape[1:3], dtype=np.float32)
+        for point in json.loads(positive_coords or "[]"):
+            mask[0, point["y"], point["x"]] = frame + 1
+        return (_Tensor(mask), [])
+
+    def video_track(images, model, initial_mask=None, conditioning=None,
+                    detection_threshold=0.5, max_objects=0, detect_interval=1):
+        return ({"frames": _Sam3.frames(images), "init": initial_mask, "cond": conditioning,
+                 "size": images.shape[1:3]},)
+
+    def track_to_mask(track_data, object_indices=""):
+        def default(frame, data):
+            return data["init"][0] if data["init"] is not None else np.zeros(data["size"], np.float32)
+
+        rule = _Sam3.track or default
+        return (_Tensor(np.stack([rule(f, track_data) for f in track_data["frames"]])),)
+
+    mod = types.ModuleType("comfy_extras.nodes_sam3")
+    mod.SAM3_Detect = node("SAM3_Detect", detect)
+    mod.SAM3_VideoTrack = node("SAM3_VideoTrack", video_track)
+    mod.SAM3_TrackToMask = node("SAM3_TrackToMask", track_to_mask)
+    return mod
+
+
+def _comfy_nodes_stub():
+    """ComfyUI's top-level `nodes` module: only CLIPTextEncode is used."""
+
+    class CLIPTextEncode:
+        def encode(self, clip, text):
+            _Sam3.calls.append(("CLIPTextEncode", {"clip": clip, "text": text}))
+            return ([["cond", {"text": text}]],)
+
+    mod = types.ModuleType("nodes")
+    mod.CLIPTextEncode = CLIPTextEncode
+    return mod
+
+
 class _Routes:
     def __init__(self):
         self.handlers = {}
@@ -279,6 +352,8 @@ def setUpModule():
 
     comfy_api, comfy_api_latest = _comfy_api_stub()
     comfy_extras, save_3d = _save_3d_stub()
+    sam3 = _sam3_stub()
+    comfy_extras.nodes_sam3 = sam3
     aiohttp, aiohttp_web = _aiohttp_stub()
     stubs = {
         "server": _server_stub(),
@@ -291,6 +366,8 @@ def setUpModule():
         "comfy_api.latest": comfy_api_latest,
         "comfy_extras": comfy_extras,
         "comfy_extras.nodes_save_3d": save_3d,
+        "comfy_extras.nodes_sam3": sam3,
+        "nodes": _comfy_nodes_stub(),
     }
     for name, module in stubs.items():
         _REAL_MODULES[name] = sys.modules.get(name)
@@ -342,13 +419,14 @@ ALL_NODES = {
     "WWAIExposeOutputImage", "WWAIExposeOutputAudio",
     "WWAIExposeOutputVideo", "WWAIExposeOutputMesh",
     "WWAIRefuseBlankMask",
+    "WWAIExposeKeyframes", "WWAIExposeImageOrVideo", "WWAIExposeOutputImageOrVideo", "WWAIRotoTrack",
 }
 # Utility nodes WWAI does not treat as markers (no WWAIExpose prefix): they
 # carry no name/description/required widgets.
-NON_MARKER_NODES = {"WWAIRefuseBlankMask"}
+NON_MARKER_NODES = {"WWAIRefuseBlankMask", "WWAIRotoTrack"}
 OUTPUT_NODES = {
     "WWAIExposeOutputImage", "WWAIExposeOutputAudio",
-    "WWAIExposeOutputVideo", "WWAIExposeOutputMesh",
+    "WWAIExposeOutputVideo", "WWAIExposeOutputMesh", "WWAIExposeOutputImageOrVideo",
 }
 
 
@@ -384,9 +462,11 @@ class RegistrationTest(unittest.TestCase):
             self.assertIs(widget[1]["default"], True, name)
 
     def test_non_markers_do_not_use_the_marker_prefix(self):
+        display = {"WWAIRefuseBlankMask": "WWAI Refuse Blank Mask", "WWAIRotoTrack": "WWAI Roto Track"}
+        self.assertEqual(set(display), NON_MARKER_NODES)
         for name in NON_MARKER_NODES:
             self.assertFalse(name.startswith("WWAIExpose"), name)
-            self.assertEqual(nodes.NODE_DISPLAY_NAME_MAPPINGS[name], "WWAI Refuse Blank Mask")
+            self.assertEqual(nodes.NODE_DISPLAY_NAME_MAPPINGS[name], display[name])
 
     def test_no_output_marker_declares_a_required_toggle(self):
         for name in OUTPUT_NODES:
@@ -764,10 +844,25 @@ class RefuseBlankMaskTest(unittest.TestCase):
         frames = _Tensor(np.zeros((2, 4, 4, 3), dtype=np.float32))
         with self.assertRaises(MarkerContractError) as caught:
             nodes.WWAIRefuseBlankMask().expose(frames)
-        self.assertEqual(
-            str(caught.exception),
-            "WWAI_NOTHING_FOUND: The prompt found nothing in this file. Try other words.",
-        )
+        self.assertEqual(str(caught.exception), NOTHING_FOUND)
+
+    def test_an_empty_batch_is_nothing_found_not_a_max_error(self):
+        frames = _Tensor(np.zeros((0, 4, 4, 3), dtype=np.float32))
+        with self.assertRaises(MarkerContractError) as caught:
+            nodes.WWAIRefuseBlankMask().expose(frames)
+        self.assertEqual(str(caught.exception), NOTHING_FOUND)
+
+    def test_only_this_node_raises_the_token(self):
+        import ast
+
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nodes.py")
+        with open(path, encoding="utf-8") as handle:
+            source = handle.read()
+        (cls,) = [n for n in ast.parse(source).body if isinstance(n, ast.ClassDef) and n.name == "WWAIRefuseBlankMask"]
+        lines = [i for i, line in enumerate(source.splitlines(), 1) if "WWAI_NOTHING_FOUND" in line]
+        self.assertTrue(lines)
+        for line in lines:
+            self.assertTrue(cls.lineno <= line <= cls.end_lineno, f"WWAI_NOTHING_FOUND outside WWAIRefuseBlankMask at line {line}")
 
     def test_is_a_plain_non_output_image_node(self):
         cls = nodes.WWAIRefuseBlankMask
@@ -775,6 +870,276 @@ class RefuseBlankMaskTest(unittest.TestCase):
         self.assertEqual(cls.RETURN_NAMES, ("images",))
         self.assertEqual(cls.INPUT_TYPES(), {"required": {"images": ("IMAGE",)}})
         self.assertFalse(getattr(cls, "OUTPUT_NODE", False))
+
+
+NOTHING_FOUND = "WWAI_NOTHING_FOUND: Nothing was found, so no mask was made."
+
+SETTINGS = {
+    "prompt_threshold": 0.11, "prompt_max_objects": 7, "prompt_detect_interval": 3,
+    "click_threshold": 0.22, "click_max_objects": 5, "click_detect_interval": 2,
+    "detect_threshold": 0.33, "refine_iterations": 4,
+}
+
+
+def _clip(frame_count, size=4):
+    """A clip whose every pixel holds its frame index (see _Sam3)."""
+    frames = np.zeros((frame_count, size, size, 3), dtype=np.float32)
+    for i in range(frame_count):
+        frames[i] = i
+    return _Tensor(frames)
+
+
+def _keys(keys, frame_range=None):
+    import json
+
+    point = {1: (1, 1), 2: (2, 2), 0: (3, 3)}
+    state = {"source": "a" * 64, "keyframes": [
+        {"frame": f, "object": o, "items": [] if empty else [
+            {"kind": "point", "mode": "include", "x": point[o][0], "y": point[o][1]}]}
+        for f, o, *empty in keys
+    ]}
+    if frame_range:
+        state["range"] = {"in": frame_range[0], "out": frame_range[1]}
+    return json.dumps(state)
+
+
+def _track(frames, keyframes, prompt="", **settings):
+    _Sam3.calls.clear()
+    (mask,) = nodes.WWAIRotoTrack().expose(
+        frames=frames, model="sam3-model", clip="sam3-clip", keyframes=keyframes, prompt=prompt,
+        **{**SETTINGS, **settings},
+    )
+    return mask
+
+
+def _calls(name):
+    return [kwargs for call, kwargs in _Sam3.calls if call == name]
+
+
+class RotoTrackTest(unittest.TestCase):
+    def tearDown(self):
+        _Sam3.track = None
+
+    def test_shape(self):
+        cls = nodes.WWAIRotoTrack
+        self.assertEqual(cls.RETURN_TYPES, ("IMAGE",))
+        self.assertEqual(cls.RETURN_NAMES, ("mask",))
+        required = cls.INPUT_TYPES()["required"]
+        self.assertEqual(
+            [(k, v[0]) for k, v in list(required.items())[:5]],
+            [("frames", "IMAGE"), ("model", "MODEL"), ("clip", "CLIP"), ("keyframes", "STRING"), ("prompt", "STRING")],
+        )
+        self.assertEqual(list(required)[5:], list(SETTINGS))
+        for name in SETTINGS:
+            self.assertIn(required[name][0], ("FLOAT", "INT"), name)
+            self.assertNotIn("default", required[name][1], name)
+        self.assertNotIn("optional", cls.INPUT_TYPES())
+
+    def test_staggered_keys_each_object_takes_its_nearest_keyframe(self):
+        mask = _track(_clip(150), _keys([(0, 1), (100, 1), (50, 2)], (40, 120)))
+        self.assertEqual(mask.shape, (81, 4, 4, 3))
+        frame_60 = mask[60 - 40]
+        self.assertEqual(frame_60[1, 1, 0], 101)  # object 1 from its key at 100
+        self.assertEqual(frame_60[2, 2, 0], 51)  # object 2 from its key at 50
+        self.assertEqual(mask[50 - 40][1, 1, 0], 1)  # a tie goes to the earlier key (0)
+        self.assertEqual(mask[51 - 40][1, 1, 0], 101)
+
+    def test_steps_match_every_tracked_frames_row(self):
+        import json
+
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "click_cases.json")
+        with open(path, encoding="utf-8") as handle:
+            rows = json.load(handle)["tracked_frames"]
+        for row in rows:
+            with self.subTest(row["name"]):
+                _track(_clip(row["frame_count"]), row["state"], "person" if row["prompt_set"] else "")
+                stepped = sum(call["images"].shape[0] for call in _calls("SAM3_VideoTrack"))
+                self.assertEqual(stepped, row["tracked"])
+
+    def test_backward_runs_get_the_frames_reversed(self):
+        _track(_clip(10), _keys([(5, 1)], (2, 5)))
+        (call,) = _calls("SAM3_VideoTrack")
+        self.assertEqual(_Sam3.frames(call["images"]), [5, 4, 3, 2])
+
+    def test_a_blank_prompt_is_never_encoded(self):
+        _track(_clip(10), _keys([(0, 1)]), prompt="   ")
+        self.assertEqual(_calls("CLIPTextEncode"), [])
+        self.assertTrue(all(call.get("conditioning") is None for call in _calls("SAM3_VideoTrack")))
+
+    def test_a_prompt_with_no_object_0_key_tracks_from_frame_0(self):
+        _track(_clip(100), _keys([], (50, 60)), prompt="person")
+        (encode,) = _calls("CLIPTextEncode")
+        self.assertEqual((encode["clip"], encode["text"]), ("sam3-clip", "person"))
+        self.assertEqual(_calls("SAM3_Detect"), [])
+        (call,) = _calls("SAM3_VideoTrack")
+        self.assertEqual(_Sam3.frames(call["images"]), list(range(0, 61)))
+        self.assertIsNone(call["initial_mask"])
+        self.assertIsNotNone(call["conditioning"])
+
+    def test_a_prompt_keyframe_detects_with_the_prompt_and_its_clicks(self):
+        _track(_clip(10), _keys([(4, 0)], (4, 9)), prompt="person")
+        (detect,) = _calls("SAM3_Detect")
+        self.assertEqual(_Sam3.frames(detect["image"]), [4])
+        self.assertIsNotNone(detect["conditioning"])
+        self.assertEqual(detect["positive_coords"], '[{"x": 3, "y": 3}]')
+        (call,) = _calls("SAM3_VideoTrack")
+        self.assertEqual(call["initial_mask"][0][3, 3], 5)  # the detect mask at frame 4
+        self.assertEqual(_Sam3.frames(call["images"]), list(range(4, 10)))
+
+    def test_each_setting_reaches_its_sam3_call(self):
+        _track(_clip(10), _keys([(0, 0, "empty"), (0, 1)]), prompt="person")
+        detects = _calls("SAM3_Detect")
+        self.assertEqual(len(detects), 2)
+        for call in detects:
+            self.assertEqual((call["threshold"], call["refine_iterations"]), (0.33, 4))
+            self.assertIs(call["individual_masks"], False)
+        prompt_track, click_track = _calls("SAM3_VideoTrack")
+        self.assertIsNotNone(prompt_track["conditioning"])
+        self.assertEqual(
+            (prompt_track["detection_threshold"], prompt_track["max_objects"], prompt_track["detect_interval"]),
+            (0.11, 7, 3),
+        )
+        self.assertIsNone(click_track.get("conditioning"))
+        self.assertEqual(
+            (click_track["detection_threshold"], click_track["max_objects"], click_track["detect_interval"]),
+            (0.22, 5, 2),
+        )
+        for call in _calls("SAM3_VideoTrack") + detects:
+            self.assertEqual(call["model"], "sam3-model")
+
+    def test_a_grammar_refusal_comes_before_any_sam3_work(self):
+        with self.assertRaises(MarkerContractError) as caught:
+            _track(_clip(100), _keys([(55, 1)], (60, 50)))
+        self.assertIn("COMFYUI_CLICKS_INVALID: in_after_out:", str(caught.exception))
+        self.assertEqual(_Sam3.calls, [])
+
+    def test_twenty_objects_and_three_hundred_items_pass(self):
+        import json
+
+        many = json.dumps({"source": "a" * 64, "keyframes": [
+            {"frame": 0, "object": o, "items": [{"kind": "point", "mode": "include", "x": 1, "y": 1}] * (300 if o == 1 else 1)}
+            for o in range(1, 21)
+        ]})
+        mask = _track(_clip(3), many)
+        self.assertEqual(mask.shape[0], 3)
+
+    def test_the_layers_are_unioned(self):
+        mask = _track(_clip(5), _keys([(0, 1), (0, 2)]))
+        self.assertEqual((mask[3][1, 1, 0], mask[3][2, 2, 0]), (1, 1))
+
+    # Nothing found: the tracker never raises it; WWAIRefuseBlankMask after it does.
+
+    def test_a_prompt_that_matches_from_frame_30_passes(self):
+        _Sam3.track = lambda f, data: np.full(data["size"], 1.0 if f >= 30 else 0.0, np.float32)
+        mask = _track(_clip(50), _keys([]), prompt="person")
+        self.assertEqual(float(mask[0].max()), 0.0)
+        (out,) = nodes.WWAIRefuseBlankMask().expose(mask)
+        self.assertIs(out, mask)
+
+    def test_a_click_track_lost_before_in_is_blank_and_then_refused(self):
+        _Sam3.track = lambda f, data: data["init"][0] * (f < 40)
+        mask = _track(_clip(100), _keys([(0, 1)], (50, 60)))
+        self.assertEqual(float(mask.max()), 0.0)
+        with self.assertRaises(MarkerContractError) as caught:
+            nodes.WWAIRefuseBlankMask().expose(mask)
+        self.assertEqual(str(caught.exception), NOTHING_FOUND)
+
+    def test_one_masked_frame_in_the_range_passes(self):
+        _Sam3.track = lambda f, data: data["init"][0] * (f == 55)
+        mask = _track(_clip(100), _keys([(0, 1)], (50, 60)))
+        nodes.WWAIRefuseBlankMask().expose(mask)
+
+
+class ExposeKeyframesTest(unittest.TestCase):
+    def test_shape(self):
+        cls = nodes.WWAIExposeKeyframes
+        self.assertEqual(cls.RETURN_TYPES, ("STRING",))
+        self.assertEqual(cls.RETURN_NAMES, ("keyframes",))
+        self.assertEqual(list(cls.INPUT_TYPES()["required"]), ["value", "name", "description", "required"])
+
+    def test_passes_the_text_and_refuses_malformed_text(self):
+        text = _keys([(0, 1)])
+        self.assertEqual(nodes.WWAIExposeKeyframes().expose(text, "clicks", "", True), (text,))
+        with self.assertRaises(MarkerContractError) as caught:
+            nodes.WWAIExposeKeyframes().expose("{", "clicks", "", True)
+        self.assertIn("COMFYUI_CLICKS_INVALID: malformed:", str(caught.exception))
+        with self.assertRaises(MarkerContractError):
+            nodes.WWAIExposeKeyframes().expose(text, " ", "", True)
+
+
+class ImageOrVideoTest(unittest.TestCase):
+    def test_shape(self):
+        cls = nodes.WWAIExposeImageOrVideo
+        self.assertEqual(cls.RETURN_TYPES, ("IMAGE", "WWAI_MEDIA_INFO"))
+        self.assertEqual(cls.RETURN_NAMES, ("images", "media_info"))
+        self.assertIn("file", cls.INPUT_TYPES()["required"])
+        out = nodes.WWAIExposeOutputImageOrVideo.INPUT_TYPES()
+        self.assertEqual(list(out["required"]), ["images", "media_info", "name", "description"])
+        self.assertEqual(out["required"]["media_info"], ("WWAI_MEDIA_INFO",))
+
+    def test_a_picture_gives_what_expose_image_gives(self):
+        images, info = nodes.WWAIExposeImageOrVideo().expose("shot.png", "src", "", True)
+        image, _ = nodes.WWAIExposeImage().expose("shot.png", "src", "", True)
+        np.testing.assert_array_equal(images, image)
+        self.assertEqual(info, {"kind": "image", "fps": None})
+
+    def test_a_movie_gives_what_expose_video_gives(self):
+        images, info = nodes.WWAIExposeImageOrVideo().expose("clip.mp4", "src", "", True)
+        _, frames, _, fps = nodes.WWAIExposeVideo().expose("clip.mp4", "src", "", True)
+        np.testing.assert_array_equal(images, frames)
+        self.assertEqual(info, {"kind": "video", "fps": Fraction(24, 1)})
+        self.assertEqual(float(info["fps"]), fps)
+
+    def test_a_file_that_is_neither_is_refused(self):
+        with self.assertRaises(MarkerContractError):
+            nodes.WWAIExposeImageOrVideo().expose("track.flac", "src", "", True)
+
+    def test_staged_file_refusal_is_shared(self):
+        import hashlib
+
+        os.makedirs(os.path.join(_IN, "wwai"), exist_ok=True)
+        rel = f"wwai/wwai-{hashlib.sha256(b'abc').hexdigest()}.mp4"
+        with open(os.path.join(_IN, rel), "wb") as handle:
+            handle.write(b"not-abc")
+        with self.assertRaises(MarkerContractError) as caught:
+            nodes.WWAIExposeImageOrVideo().expose(rel, "src", "", True)
+        self.assertIn("WWAI_STAGED_FILE_UNUSABLE", str(caught.exception))
+
+    def test_output_writes_a_png_for_a_picture(self):
+        _, info = nodes.WWAIExposeImageOrVideo().expose("shot.png", "src", "", True)
+        result = nodes.WWAIExposeOutputImageOrVideo().expose(
+            images=_Tensor(np.zeros((1, 4, 4, 3), dtype=np.float32)), media_info=info, name="mask", description=""
+        )
+        entry = result["ui"]["wwai_result"][0]
+        self.assertTrue(entry["filename"].endswith(".png"))
+        with Image.open(_written(entry)) as img:
+            self.assertEqual(img.format, "PNG")
+
+    def test_output_writes_an_mp4_at_the_input_fps(self):
+        info = {"kind": "video", "fps": Fraction(15, 1)}
+        captured = {}
+        real = nodes.InputImpl.VideoFromComponents
+
+        def spy(components, **kwargs):
+            captured["fps"] = components.frame_rate
+            return real(components, **kwargs)
+
+        nodes.InputImpl.VideoFromComponents = spy
+        try:
+            result = nodes.WWAIExposeOutputImageOrVideo().expose(
+                images=_Tensor(np.zeros((3, 4, 4, 3), dtype=np.float32)), media_info=info, name="mask", description=""
+            )
+        finally:
+            nodes.InputImpl.VideoFromComponents = real
+        self.assertTrue(result["ui"]["wwai_result"][0]["filename"].endswith(".mp4"))
+        self.assertEqual(captured["fps"], Fraction(15, 1))
+
+    def test_output_refuses_a_blank_name(self):
+        with self.assertRaises(MarkerContractError):
+            nodes.WWAIExposeOutputImageOrVideo().expose(
+                images=_Tensor(np.zeros((1, 4, 4, 3), dtype=np.float32)),
+                media_info={"kind": "image", "fps": None}, name="", description="",
+            )
 
 
 class StagedFileUseTest(unittest.TestCase):
@@ -817,7 +1182,7 @@ class OutputMarkerCachingTest(unittest.TestCase):
         import math
 
         outputs = [cls for cls in nodes.NODE_CLASS_MAPPINGS.values() if getattr(cls, "OUTPUT_NODE", False)]
-        self.assertEqual(len(outputs), 4)
+        self.assertEqual(len(outputs), 5)
         for cls in outputs:
             first = cls.IS_CHANGED(value=None, name="n", description="")
             self.assertTrue(math.isnan(first), cls.__name__)

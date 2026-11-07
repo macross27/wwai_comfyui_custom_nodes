@@ -20,6 +20,28 @@ git clone https://github.com/macross27/wwai_comfyui_custom_nodes.git
 
 Restart ComfyUI. No extra Python dependencies.
 
+### Installing an update on a WWAI GPU machine (drain first)
+
+Install on every switched-on machine of a GPU group linked to any of WWAI's
+SAM3 tools (each tool's groups are in Admin > Services; each group's machines
+in Admin > GPU machines), one machine at a time so the others keep serving. A
+switched-off machine of those groups is installed too, before it is switched
+back on. On each machine:
+
+1. Switch the machine off in Admin > GPU machines. No new renders or clicks go
+   to it, and every movie click booking on it ends. Bring down any gate stack
+   that uses the machine.
+2. Wait until WWAI's `comfyui_queue` table holds no row for the machine, then
+   until `GET http://<machine>:8188/queue` shows nothing running or pending.
+   Both, because a restart wipes ComfyUI's history and WWAI reads a missing
+   entry as still running.
+3. Copy this folder to the machine's `ComfyUI/custom_nodes/wwai_comfyui_custom_nodes`
+   (on 10.0.20.100: `/Virtual/comfyui/ComfyUI/custom_nodes/wwai_comfyui_custom_nodes`,
+   as `pixell`).
+4. `kill -TERM` the ComfyUI process, wait for `comfyui.service` to bring it back,
+   and check that `GET http://<machine>:8188/object_info` lists the new classes.
+5. Switch the machine back on in Admin > GPU machines.
+
 **Requires** a ComfyUI that ships `comfy_api.latest` (`IO`, `UI`, `InputImpl`,
 `Types`) — the same build that provides `Load3D`, `SaveGLB` and the native
 `VIDEO` type. The audio input node additionally needs `torchaudio`, the same
@@ -36,6 +58,7 @@ media markers and `value` on the scalar ones; WWAI rewrites exactly that key.
 |---|---|
 | WWAI Expose Text | `STRING` |
 | WWAI Expose Clicks | `include_points`, `exclude_points` (`STRING` JSON `[{"x","y"}]`), `include_boxes`, `exclude_boxes` (`BOUNDING_BOX`), `frame` (`INT`) — see below |
+| WWAI Expose Keyframes | `keyframes` (`STRING`): clicks on several frames for several objects — see below |
 | WWAI Expose Int | `INT` |
 | WWAI Expose Float | `FLOAT` |
 | WWAI Expose Bool | `BOOLEAN` |
@@ -43,6 +66,7 @@ media markers and `value` on the scalar ones; WWAI rewrites exactly that key.
 | WWAI Expose Image | `IMAGE` + `MASK` (also reads `.exr`, kept scene-linear and unclamped) |
 | WWAI Expose Audio | `AUDIO` |
 | WWAI Expose Video | `video`, `images`, `audio`, `fps` — see below |
+| WWAI Expose Image Or Video | `images` (`IMAGE`, one frame for a picture), `media_info` (`WWAI_MEDIA_INFO`: kind + frame rate) |
 | WWAI Expose Mesh | `FILE_3D` |
 
 Outputs — category `WWAI/Expose Output`. Each is a terminal node that saves
@@ -53,6 +77,7 @@ one file.
 | WWAI Expose Output Image | `IMAGE` | `.png` (8/16-bit), `.exr` (16/32-bit float) or `.avif` (8/10-bit, HDR) |
 | WWAI Expose Output Audio | `AUDIO` | `.flac`, `.mp3` or `.opus` |
 | WWAI Expose Output Video | `video`, **or** `images` + `audio` + `fps` | `.mp4` |
+| WWAI Expose Output Image Or Video | `images` + `media_info` (required, from WWAI Expose Image Or Video) | `.png` for a picture, `.mp4` at the input's frame rate for a movie |
 | WWAI Expose Output Mesh | `MESH` or any of ComfyUI's 13 `FILE_3D_*` types | `.glb` from geometry; the source file copied verbatim otherwise |
 
 The image output's `format`, `bit_depth` and `input_color_space` widgets match
@@ -195,12 +220,39 @@ An empty value, bad JSON, unknown keys, fractional pixels or an empty `items`
 list fail the run with `COMFYUI_CLICKS_INVALID`. The shared test rows are in
 `click_cases.json`.
 
+### WWAI Expose Keyframes and WWAI Roto Track
+
+`value` holds `{"source", "keyframes": [{"frame", "object", "items"}], "range": {"in", "out"}}`
+(`range` optional; absent = the whole clip), items in the clicks grammar above.
+Object 0 is the prompt's layer: its items refine the typed prompt and may be
+empty. Objects 1 and up are clicks only. WWAI Roto Track refuses, before any
+SAM3 work, with `COMFYUI_CLICKS_INVALID: <reason>: ...`: `malformed`,
+`in_after_out`, `repeated_keyframe` (same frame and object twice),
+`frame_outside_clip`, `range_outside_clip`, `picture_frame_not_zero`,
+`prompt_keyframe_without_prompt`, `click_object_without_clicks`,
+`nothing_to_track` (no prompt, no clicks), `empty_clip`. There are no count
+limits here; WWAI caps size and tracking work.
+
+For each layer, every output frame takes the track from its nearest keyframe
+(a tie goes to the earlier one). A keyframe at `k` whose frames are `a..b`
+tracks forward over `k..b` when `b > k` and backward over `k..a` when `a < k`
+(one one-frame run when `a = b = k`); a keyframe no output frame takes is not
+tracked. A prompt with no object-0 keyframe is keyed at frame 0. Layers are
+unioned, so a frame's mask never depends on `range`. `tracked_frames` in
+`wwai_markers_core.py` counts these steps; the `tracked_frames` rows of
+`click_cases.json` pin it. The eight number widgets (`prompt_*` for the prompt
+layer's SAM3_VideoTrack, `click_*` for each click layer's, `detect_threshold`
+and `refine_iterations` for SAM3_Detect) have no default: the workflow must
+set each. The tracker never fails on a blank result; put WWAI Refuse Blank
+Mask after it.
+
 Utility — category `WWAI/Utility`. Not a marker (no `WWAIExpose` prefix, no
 `name`/`description` widgets).
 
 | Node | Does |
 |---|---|
-| WWAI Refuse Blank Mask | Takes `images`, returns them unchanged. If every pixel of the whole batch is zero it fails with `WWAI_NOTHING_FOUND: The prompt found nothing in this file. Try other words.` instead of letting a mask run save an all-black file. |
+| WWAI Refuse Blank Mask | Takes `images`, returns them unchanged. If every pixel of the whole batch is zero, or the batch is empty, it fails with `WWAI_NOTHING_FOUND: Nothing was found, so no mask was made.` instead of letting a mask run save an all-black file. |
+| WWAI Roto Track | Takes `frames`, `model` and `clip` (the SAM3 checkpoint), `keyframes`, `prompt` and eight tuning numbers; returns `mask` (`IMAGE`, white = object) for the output range. Needs ComfyUI's SAM3 nodes. |
 
 ## Staged-file delete door
 
@@ -216,10 +268,8 @@ Operator steps:
 
 1. Create the secret file in this add-on folder, at least 32 characters:
    `openssl rand -hex 32 > .wwai_staged_file_secret` (gitignored, read on every
-   request, so no ComfyUI restart is needed for a change). On the Windows GPU
-   host use PowerShell and write plain ASCII:
-   `$b = New-Object byte[] 32; [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b); ($b | ForEach-Object { $_.ToString('x2') }) -join '' | Set-Content -Encoding ascii -NoNewline .wwai_staged_file_secret`
-   (UTF-8 with a BOM and UTF-16, as PowerShell's `>` writes, are read too).
+   request, so no ComfyUI restart is needed for a change). The GPU host is
+   Linux; a file written with a BOM or as UTF-16 is read too.
 2. Put the same value in WWAI's `COMFYUI_STAGED_FILE_DELETE_SECRET`.
 3. Restart ComfyUI once so the route is registered.
 

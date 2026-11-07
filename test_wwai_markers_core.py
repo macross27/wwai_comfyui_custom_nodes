@@ -22,8 +22,12 @@ from wwai_markers_core import (
     extension_of,
     require_marker_name,
     require_single,
+    check_keyframes,
+    parse_keyframes,
+    plan_tracking,
     split_clicks,
     staged_file_delete,
+    tracked_frames,
     unannotated,
 )
 
@@ -480,6 +484,89 @@ class SplitClicksTest(unittest.TestCase):
     def test_non_text_is_refused(self):
         with self.assertRaises(MarkerContractError):
             split_clicks({"source": "a" * 64, "frame": 0, "items": []})
+
+
+class KeyframesTest(unittest.TestCase):
+    """The keyframes grammar and the step count, from click_cases.json's keyframe keys."""
+
+    CASES = SplitClicksTest.CASES
+
+    @staticmethod
+    def _check(row):
+        return check_keyframes(parse_keyframes(row["state"]), row["frame_count"], row["prompt_set"])
+
+    def test_valid_rows(self):
+        for row in self.CASES["keyframes_valid"]:
+            with self.subTest(row["name"]):
+                self._check(row)
+
+    def test_invalid_rows_are_refused_by_name(self):
+        reasons = set()
+        for row in self.CASES["keyframes_invalid"]:
+            with self.subTest(row["name"]):
+                with self.assertRaises(MarkerContractError) as caught:
+                    self._check(row)
+                self.assertTrue(
+                    str(caught.exception).startswith(f"{row['refusal']}: {row['reason']}:"),
+                    str(caught.exception),
+                )
+                reasons.add(row["reason"])
+        self.assertEqual(
+            reasons,
+            {
+                "malformed", "in_after_out", "repeated_keyframe", "frame_outside_clip",
+                "range_outside_clip", "picture_frame_not_zero", "prompt_keyframe_without_prompt",
+                "nothing_to_track", "click_object_without_clicks", "empty_clip",
+            },
+        )
+
+    def test_the_rows_the_plan_names_are_present(self):
+        tracked = {row["name"]: row["tracked"] for row in self.CASES["tracked_frames"]}
+        self.assertEqual(tracked["staggered keys over 40-120"], 204)
+        self.assertEqual(tracked["prompt with no object-0 key over 50-60"], 61)
+        self.assertEqual(tracked["picture with a prompt and one click"], 2)
+        invalid = {row["name"]: row["reason"] for row in self.CASES["keyframes_invalid"]}
+        self.assertEqual(invalid["range In 60 after Out 50"], "in_after_out")
+        self.assertEqual(invalid["two keyframes at frame 10 for object 1"], "repeated_keyframe")
+
+    def test_tracked_frames_rows(self):
+        for row in self.CASES["tracked_frames"]:
+            with self.subTest(row["name"]):
+                self.assertEqual(tracked_frames(row["state"], row["frame_count"], row["prompt_set"]), row["tracked"])
+
+    def test_nearest_keyframe_per_object_tie_goes_earlier(self):
+        rows = {row["name"]: row for row in self.CASES["tracked_frames"]}
+        row = rows["staggered keys over 40-120"]
+        (first, last), layers = plan_tracking(row["state"], row["frame_count"], row["prompt_set"])
+        self.assertEqual((first, last), (40, 120))
+        spans = {obj: [(s.key, s.first, s.last) for s in layer] for obj, layer in layers}
+        # A at 0 and 100: frame 50 is a tie, so it goes to 0; B at 50 takes the whole range.
+        self.assertEqual(spans, {1: [(0, 40, 50), (100, 51, 120)], 2: [(50, 40, 120)]})
+
+    def test_a_prompt_with_no_object_0_key_is_keyed_at_frame_0(self):
+        state = json.dumps({"source": "a" * 64, "keyframes": [], "range": {"in": 50, "out": 60}})
+        _, layers = plan_tracking(state, 150, True)
+        (obj, layer), = layers
+        self.assertEqual(obj, 0)
+        (span,) = layer
+        self.assertEqual((span.key, span.items, span.first, span.last), (0, None, 50, 60))
+        self.assertEqual(span.calls, ((0, 60),))
+
+    def test_steps_per_span(self):
+        from wwai_markers_core import track_calls
+
+        self.assertEqual(track_calls(5, 5, 5), ((5, 5),))
+        self.assertEqual(track_calls(5, 5, 9), ((5, 9),))
+        self.assertEqual(track_calls(5, 2, 5), ((5, 2),))
+        self.assertEqual(track_calls(5, 2, 9), ((5, 9), (5, 2)))
+        self.assertEqual(track_calls(0, 40, 50), ((0, 50),))
+        self.assertEqual(track_calls(100, 51, 120), ((100, 120), (100, 51)))
+
+    def test_parse_alone_checks_shape_order_and_repeats(self):
+        state = json.dumps({"source": "a" * 64, "keyframes": [{"frame": 3, "object": 1, "items": []}]})
+        keyframes, frame_range = parse_keyframes(state)
+        self.assertEqual(frame_range, None)
+        self.assertEqual([(k.frame, k.object) for k in keyframes], [(3, 1)])
 
 
 if __name__ == "__main__":
