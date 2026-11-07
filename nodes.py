@@ -22,6 +22,8 @@ these.
 import json
 import logging
 import os
+import weakref
+from collections import OrderedDict
 from fractions import Fraction
 
 import av
@@ -1129,6 +1131,16 @@ class WWAIRefuseBlankMask:
         return (images,)
 
 
+# One-frame layer results, so a click that changes one object does not re-run
+# the others (the prompt layer's detect + track is ~0.3 s of a warm click).
+# Keyed by every input the layer reads; the frames, model and clip are matched
+# by identity through weak references, so a freed object never matches.
+# ponytail: 8 entries, one-frame runs only (one mask each); a multi-frame
+# Track is never cached, so memory stays at 8 masks.
+_LAYER_CACHE_SIZE = 8
+_LAYER_CACHE = OrderedDict()
+
+
 def _number(kind, tooltip, **limits):
     # No default on purpose: a workflow that leaves one out fails ComfyUI's own
     # required-input check instead of running on a number nobody chose.
@@ -1181,42 +1193,73 @@ class WWAIRotoTrack:
                detect_threshold, refine_iterations):
         prompt_set = bool(prompt.strip())
         (first, last), layers = plan_tracking(keyframes, frames.shape[0], prompt_set)
-        conditioning = CLIPTextEncode().encode(clip, prompt)[0] if prompt_set else None
+        detect = (detect_threshold, refine_iterations)
+        encoded = []
+
+        def conditioning():
+            if not encoded:
+                encoded.append(CLIPTextEncode().encode(clip, prompt)[0])
+            return encoded[0]
+
         union = {}
         for obj, spans in layers:
             if obj == 0:
-                cond, settings = conditioning, (prompt_threshold, prompt_max_objects, prompt_detect_interval)
+                settings = (prompt_threshold, prompt_max_objects, prompt_detect_interval)
             else:
-                cond, settings = None, (click_threshold, click_max_objects, click_detect_interval)
-            layer = {}
-            for span in spans:
-                initial = None
-                if span.items is not None:
-                    include_points, exclude_points, include_boxes, _ = split_items(span.items)
-                    # SAM3_Detect has no exclude-box input; today's SAM3 tools drop them too.
-                    initial = SAM3_Detect.execute(
-                        model=model, image=frames[span.key : span.key + 1], conditioning=cond,
-                        bboxes=include_boxes or None, positive_coords=include_points,
-                        negative_coords=exclude_points, threshold=detect_threshold,
-                        refine_iterations=refine_iterations, individual_masks=False,
-                    ).args[0]
-                for start, end in span.calls:
-                    if end >= start:
-                        order, images = range(start, end + 1), frames[start : end + 1]
-                    else:
-                        order, images = range(start, end - 1, -1), torch.flip(frames[end : start + 1], dims=(0,))
-                    track = SAM3_VideoTrack.execute(
-                        images=images, model=model, initial_mask=initial, conditioning=cond,
-                        detection_threshold=settings[0], max_objects=settings[1], detect_interval=settings[2],
-                    ).args[0]
-                    masks = SAM3_TrackToMask.execute(track_data=track, object_indices="").args[0]
-                    for index, frame in enumerate(order):
-                        if span.first <= frame <= span.last:
-                            layer.setdefault(frame, masks[index])
+                settings = (click_threshold, click_max_objects, click_detect_interval)
+            run = lambda: self._layer(frames, model, conditioning() if obj == 0 else None, spans, settings, detect)
+            if first != last:
+                layer = run()
+            else:
+                key = (obj == 0, prompt if obj == 0 else None, json.dumps(spans), settings, detect)
+                layer = _cached_layer(key, (frames, model, clip), run)
             for frame, mask in layer.items():
                 union[frame] = mask if frame not in union else torch.maximum(union[frame], mask)
         mask = torch.stack([union[frame] for frame in range(first, last + 1)])
         return (torch.stack((mask, mask, mask), dim=-1),)
+
+    @staticmethod
+    def _layer(frames, model, cond, spans, settings, detect):
+        """{clip frame: mask} for one layer: each span's frames from its keyframe's track."""
+        layer = {}
+        for span in spans:
+            initial = None
+            if span.items is not None:
+                include_points, exclude_points, include_boxes, _ = split_items(span.items)
+                # SAM3_Detect has no exclude-box input; today's SAM3 tools drop them too.
+                initial = SAM3_Detect.execute(
+                    model=model, image=frames[span.key : span.key + 1], conditioning=cond,
+                    bboxes=include_boxes or None, positive_coords=include_points,
+                    negative_coords=exclude_points, threshold=detect[0],
+                    refine_iterations=detect[1], individual_masks=False,
+                ).args[0]
+            for start, end in span.calls:
+                if end >= start:
+                    order, images = range(start, end + 1), frames[start : end + 1]
+                else:
+                    order, images = range(start, end - 1, -1), torch.flip(frames[end : start + 1], dims=(0,))
+                track = SAM3_VideoTrack.execute(
+                    images=images, model=model, initial_mask=initial, conditioning=cond,
+                    detection_threshold=settings[0], max_objects=settings[1], detect_interval=settings[2],
+                ).args[0]
+                masks = SAM3_TrackToMask.execute(track_data=track, object_indices="").args[0]
+                for index, frame in enumerate(order):
+                    if span.first <= frame <= span.last:
+                        layer.setdefault(frame, masks[index])
+        return layer
+
+
+def _cached_layer(key, objects, run):
+    hit = _LAYER_CACHE.get(key)
+    if hit is not None and all(ref() is obj for ref, obj in zip(hit[0], objects)):
+        _LAYER_CACHE.move_to_end(key)
+        return hit[1]
+    layer = run()
+    _LAYER_CACHE[key] = ([weakref.ref(obj) for obj in objects], layer)
+    _LAYER_CACHE.move_to_end(key)
+    while len(_LAYER_CACHE) > _LAYER_CACHE_SIZE:
+        _LAYER_CACHE.popitem(last=False)
+    return layer
 
 
 # --- registration -----------------------------------------------------------

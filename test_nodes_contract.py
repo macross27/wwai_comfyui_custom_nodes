@@ -903,10 +903,22 @@ def _keys(keys, frame_range=None):
     return json.dumps(state)
 
 
-def _track(frames, keyframes, prompt="", **settings):
+class _Handle:
+    """A model or clip stand-in (weak-referenceable, as ComfyUI's objects are)."""
+
+    def __init__(self, name):
+        self.name = name
+
+
+MODEL, CLIP = _Handle("sam3-model"), _Handle("sam3-clip")
+
+
+def _track(frames, keyframes, prompt="", model=None, clip=None, keep_cache=False, **settings):
+    if not keep_cache:
+        nodes._LAYER_CACHE.clear()
     _Sam3.calls.clear()
     (mask,) = nodes.WWAIRotoTrack().expose(
-        frames=frames, model="sam3-model", clip="sam3-clip", keyframes=keyframes, prompt=prompt,
+        frames=frames, model=model or MODEL, clip=clip or CLIP, keyframes=keyframes, prompt=prompt,
         **{**SETTINGS, **settings},
     )
     return mask
@@ -969,7 +981,7 @@ class RotoTrackTest(unittest.TestCase):
     def test_a_prompt_with_no_object_0_key_tracks_from_frame_0(self):
         _track(_clip(100), _keys([], (50, 60)), prompt="person")
         (encode,) = _calls("CLIPTextEncode")
-        self.assertEqual((encode["clip"], encode["text"]), ("sam3-clip", "person"))
+        self.assertEqual((encode["clip"], encode["text"]), (CLIP, "person"))
         self.assertEqual(_calls("SAM3_Detect"), [])
         (call,) = _calls("SAM3_VideoTrack")
         self.assertEqual(_Sam3.frames(call["images"]), list(range(0, 61)))
@@ -1005,7 +1017,7 @@ class RotoTrackTest(unittest.TestCase):
             (0.22, 5, 2),
         )
         for call in _calls("SAM3_VideoTrack") + detects:
-            self.assertEqual(call["model"], "sam3-model")
+            self.assertIs(call["model"], MODEL)
 
     def test_a_grammar_refusal_comes_before_any_sam3_work(self):
         with self.assertRaises(MarkerContractError) as caught:
@@ -1048,6 +1060,62 @@ class RotoTrackTest(unittest.TestCase):
         _Sam3.track = lambda f, data: data["init"][0] * (f == 55)
         mask = _track(_clip(100), _keys([(0, 1)], (50, 60)))
         nodes.WWAIRefuseBlankMask().expose(mask)
+
+
+class RotoLayerCacheTest(unittest.TestCase):
+    """A one-frame click re-runs only what changed: the prompt layer of the
+    same frame, prompt, model, clip and settings is not run again."""
+
+    def setUp(self):
+        self.frames = _clip(100)
+        _track(self.frames, _keys([(80, 0, "empty"), (80, 1)], (80, 80)), prompt="bench")
+
+    def _click(self, frames=None, prompt="bench", **kwargs):
+        keys = _keys([(80, 0, "empty"), (80, 2)], (80, 80))  # the artist clicked elsewhere
+        return _track(frames if frames is not None else self.frames, keys, prompt, keep_cache=True, **kwargs)
+
+    def _prompt_layer_ran(self):
+        return any(call.get("conditioning") is not None for call in _calls("SAM3_VideoTrack"))
+
+    def test_the_same_prompt_layer_is_served_from_the_cache(self):
+        mask = self._click()
+        self.assertFalse(self._prompt_layer_ran())
+        self.assertEqual(_calls("CLIPTextEncode"), [])
+        self.assertEqual(len(_calls("SAM3_Detect")), 1)  # the new click only
+        self.assertEqual(mask[0][2, 2, 0], 81)
+
+    def test_a_changed_prompt_runs_it_again(self):
+        self._click(prompt="chair")
+        self.assertTrue(self._prompt_layer_ran())
+        self.assertEqual(_calls("CLIPTextEncode")[0]["text"], "chair")
+
+    def test_another_model_or_clip_runs_it_again(self):
+        self._click(model=_Handle("other-model"))
+        self.assertTrue(self._prompt_layer_ran())
+        self._click(clip=_Handle("other-clip"))
+        self.assertTrue(self._prompt_layer_ran())
+
+    def test_other_frames_run_it_again(self):
+        self._click(frames=_clip(100))
+        self.assertTrue(self._prompt_layer_ran())
+
+    def test_a_changed_setting_runs_it_again(self):
+        for name, value in (("prompt_threshold", 0.9), ("prompt_max_objects", 1),
+                            ("prompt_detect_interval", 9), ("detect_threshold", 0.9), ("refine_iterations", 1)):
+            with self.subTest(name):
+                self._click(**{name: value})
+                self.assertTrue(self._prompt_layer_ran())
+
+    def test_a_multi_frame_run_is_never_cached(self):
+        keys = _keys([(80, 0, "empty")], (78, 80))
+        _track(self.frames, keys, "bench", keep_cache=True)
+        _track(self.frames, keys, "bench", keep_cache=True)
+        self.assertTrue(self._prompt_layer_ran())
+
+    def test_the_cache_is_bounded(self):
+        for frame in range(nodes._LAYER_CACHE_SIZE + 3):
+            _track(self.frames, _keys([(frame, 1)], (frame, frame)), keep_cache=True)
+        self.assertEqual(len(nodes._LAYER_CACHE), nodes._LAYER_CACHE_SIZE)
 
 
 class ExposeKeyframesTest(unittest.TestCase):
