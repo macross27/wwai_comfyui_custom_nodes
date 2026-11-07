@@ -58,8 +58,11 @@ class _Tensor(np.ndarray):
     def numel(self):
         return self.size
 
-    # torch's in-place counter; real torch bumps it itself, tests bump it by hand.
-    _version = 0
+    @property
+    def _version(self):
+        # ComfyUI runs every node under torch.inference_mode(), and an inference
+        # tensor has no in-place counter: reading it raises this, as real torch does.
+        raise RuntimeError("Inference tensors do not track version counter.")
 
     def clone(self):
         return _Tensor(np.array(self))
@@ -1138,12 +1141,6 @@ class RotoLayerCacheTest(unittest.TestCase):
         for _, layer in nodes._LAYER_CACHE.values():
             for mask in layer.values():
                 self.assertEqual(mask.untyped_storage().nbytes(), mask.nbytes)
-
-    def test_frames_changed_in_place_run_it_again(self):
-        self.frames[80] += 0  # an in-place edit; torch bumps _version, the stub needs a hand
-        self.frames._version = 1
-        self._click()
-        self.assertTrue(self._prompt_layer_ran())
 
     def test_a_multi_frame_run_is_never_cached(self):
         keys = _keys([(80, 0, "empty")], (78, 80))

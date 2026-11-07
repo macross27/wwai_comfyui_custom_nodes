@@ -1147,7 +1147,9 @@ class WWAIRefuseBlankMask:
 # Keyed by every input the layer reads; the frames, model and clip are matched
 # by identity through weak references, so a freed object never matches.
 # Each mask is stored as its own copy, never a view into the track's whole
-# batch, and the frames' in-place counter is part of the key.
+# batch. The frames carry no in-place counter: ComfyUI runs nodes under
+# torch.inference_mode(), and its own output cache already treats a node's
+# output as unchanged for as long as the same object lives.
 # ponytail: 8 entries, one-frame runs only (one copied mask each); a
 # multi-frame Track is never cached, so memory stays at 8 masks.
 _LAYER_CACHE_SIZE = 8
@@ -1224,7 +1226,7 @@ class WWAIRotoTrack:
             if first != last:
                 layer = run()
             else:
-                key = (obj == 0, prompt if obj == 0 else None, json.dumps(spans), settings, detect, frames._version)
+                key = (obj == 0, prompt if obj == 0 else None, json.dumps(spans), settings, detect)
                 layer = _cached_layer(key, (frames, model, clip), run)
             for frame, mask in layer.items():
                 union[frame] = mask if frame not in union else torch.maximum(union[frame], mask)
