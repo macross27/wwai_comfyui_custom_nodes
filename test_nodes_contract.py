@@ -987,6 +987,8 @@ class RotoTrackTest(unittest.TestCase):
             with self.subTest(row["name"]):
                 _track(_clip(row["frame_count"]), row["state"], "person" if row["prompt_set"] else "")
                 stepped = sum(call["images"].shape[0] for call in _calls("SAM3_VideoTrack"))
+                # A picture's prompt layer is one SAM3_Detect in place of its one-frame track.
+                stepped += row["frame_count"] == 1 and row["prompt_set"]
                 self.assertEqual(stepped, row["tracked"])
 
     def test_backward_runs_get_the_frames_reversed(self):
@@ -1018,6 +1020,33 @@ class RotoTrackTest(unittest.TestCase):
         (call,) = _calls("SAM3_VideoTrack")
         self.assertEqual(call["initial_mask"][0][3, 3], 5)  # the detect mask at frame 4
         self.assertEqual(_Sam3.frames(call["images"]), list(range(4, 10)))
+
+    def test_a_picture_prompt_is_the_old_picture_detect_not_a_track(self):
+        mask = _track(_clip(1), _keys([]), prompt="man:5")
+        (encode,) = _calls("CLIPTextEncode")
+        self.assertEqual(encode["text"], "man:5")  # the encoder reads the count
+        (detect,) = _calls("SAM3_Detect")
+        self.assertIsNotNone(detect["conditioning"])
+        self.assertIsNone(detect["positive_coords"])
+        self.assertEqual((detect["threshold"], detect["refine_iterations"]),
+                         (SETTINGS["detect_threshold"], SETTINGS["refine_iterations"]))
+        self.assertFalse(detect["individual_masks"])
+        self.assertEqual(_calls("SAM3_VideoTrack"), [])
+        self.assertEqual(mask.shape, (1, 4, 4, 3))
+
+    def test_a_picture_prompt_with_clicks_detects_once_with_both(self):
+        mask = _track(_clip(1), _keys([(0, 0), (0, 1)]), prompt="man")
+        detects = _calls("SAM3_Detect")
+        self.assertEqual([d["conditioning"] is not None for d in detects], [True, False])
+        self.assertEqual(detects[0]["positive_coords"], '[{"x": 3, "y": 3}]')
+        self.assertEqual(len(_calls("SAM3_VideoTrack")), 1)  # only the click layer tracks
+        self.assertEqual(mask[0][3, 3, 0], 1)
+
+    def test_a_movie_prompt_still_tracks_every_match(self):
+        _track(_clip(2), _keys([]), prompt="man")
+        self.assertEqual(_calls("SAM3_Detect"), [])
+        (call,) = _calls("SAM3_VideoTrack")
+        self.assertIsNotNone(call["conditioning"])
 
     def test_each_setting_reaches_its_sam3_call(self):
         _track(_clip(10), _keys([(0, 0, "empty"), (0, 1)]), prompt="person")

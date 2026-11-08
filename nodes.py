@@ -1199,7 +1199,8 @@ class WWAIRotoTrack:
                 settings = (prompt_threshold, prompt_max_objects, prompt_detect_interval)
             else:
                 settings = (click_threshold, click_max_objects, click_detect_interval)
-            run = lambda: self._layer(frames, model, conditioning() if obj == 0 else None, spans, settings, detect)
+            still = obj == 0 and frames.shape[0] == 1
+            run = lambda: self._layer(frames, model, conditioning() if obj == 0 else None, spans, settings, detect, still)
             if first != last:
                 layer = run()
             else:
@@ -1211,20 +1212,28 @@ class WWAIRotoTrack:
         return (torch.stack((mask, mask, mask), dim=-1),)
 
     @staticmethod
-    def _layer(frames, model, cond, spans, settings, detect):
-        """{clip frame: mask} for one layer: each span's frames from its keyframe's track."""
+    def _layer(frames, model, cond, spans, settings, detect, still=False):
+        """{clip frame: mask} for one layer: each span's frames from its keyframe's track.
+
+        ``still`` (the prompt layer on a one-frame picture) is the old picture
+        tool's rule: SAM3_Detect alone, so "man" is the one best match and
+        "man:5" up to five. SAM3_VideoTrack drops that count and takes every
+        match, which is the movie rule."""
         layer = {}
         for span in spans:
             initial = None
-            if span.items is not None:
-                include_points, exclude_points, include_boxes, _ = split_items(span.items)
+            if span.items is not None or still:
+                include_points, exclude_points, include_boxes, _ = split_items(span.items or [])
                 # SAM3_Detect has no exclude-box input; today's SAM3 tools drop them too.
                 initial = SAM3_Detect.execute(
                     model=model, image=frames[span.key : span.key + 1], conditioning=cond,
-                    bboxes=include_boxes or None, positive_coords=include_points,
-                    negative_coords=exclude_points, threshold=detect[0],
+                    bboxes=include_boxes or None, positive_coords=include_points if span.items else None,
+                    negative_coords=exclude_points if span.items else None, threshold=detect[0],
                     refine_iterations=detect[1], individual_masks=False,
                 ).args[0]
+            if still:
+                layer[span.key] = initial[0]
+                continue
             for start, end in span.calls:
                 if end >= start:
                     order, images = range(start, end + 1), frames[start : end + 1]
