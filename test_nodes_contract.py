@@ -443,7 +443,7 @@ def _written(entry):
 
 
 ALL_NODES = {
-    "WWAIExposeText", "WWAIExposeClicks", "WWAIExposeInt", "WWAIExposeFloat", "WWAIExposeBool", "WWAIExposeCombo", "WWAIExposeImage",
+    "WWAIExposeText", "WWAIExposeInt", "WWAIExposeFloat", "WWAIExposeBool", "WWAIExposeCombo", "WWAIExposeImage",
     "WWAIExposeAudio", "WWAIExposeVideo", "WWAIExposeMesh",
     "WWAIExposeOutputImage", "WWAIExposeOutputAudio",
     "WWAIExposeOutputVideo", "WWAIExposeOutputMesh",
@@ -464,14 +464,6 @@ def _audio(channels=2, batch=1):
 
 
 class RegistrationTest(unittest.TestCase):
-    def test_clicks_node_shape(self):
-        value = nodes.WWAIExposeClicks.INPUT_TYPES()["required"]["value"]
-        self.assertEqual(value[0], "STRING")
-        self.assertEqual(value[1]["default"], "")
-        self.assertEqual(
-            nodes.WWAIExposeClicks.RETURN_TYPES, ("STRING", "STRING", "BOUNDING_BOX", "BOUNDING_BOX", "INT")
-        )
-
     def test_every_node_registers_with_a_display_name(self):
         self.assertEqual(set(nodes.NODE_CLASS_MAPPINGS), ALL_NODES)
         self.assertEqual(set(nodes.NODE_DISPLAY_NAME_MAPPINGS), ALL_NODES)
@@ -1375,6 +1367,23 @@ class StagedFilesRouteTest(unittest.TestCase):
             self._post(f"wwai-{self.HEX}.png"),
             (500, {"wwai_staged_file": "failed", "detail": "cannot read the prompt queue: queue locked"}),
         )
+
+
+class RetiredNamesTest(unittest.TestCase):
+    """The one-frame click format is retired (WWAI plan 2410): its names stay out of the tracked source."""
+
+    def test_retired_names_are_gone(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        names = ("WWAIExpose" + "Clicks", "split" + "_clicks")  # split so this file does not match itself
+        for root, dirs, files in os.walk(here):
+            dirs[:] = [d for d in dirs if d not in (".git", "__pycache__")]
+            for f in files:
+                if f.endswith((".py", ".md", ".json")):
+                    with open(os.path.join(root, f), encoding="utf-8") as fh:
+                        text = fh.read()
+                    for n in names:
+                        self.assertNotIn(n, text, f"{n} in {f}")
+
 
 if __name__ == "__main__":
     unittest.main()

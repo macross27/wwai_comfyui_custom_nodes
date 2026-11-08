@@ -284,33 +284,6 @@ def _click_int(value, what, minimum=None):
     return value
 
 
-def split_clicks(text):
-    """Validate a WWAI click state (JSON text) and split it into five outputs.
-
-    Returns (include_points, exclude_points, include_boxes, exclude_boxes,
-    frame): points as JSON text of [{"x","y"}], boxes as lists of
-    {x, y, width, height}, each kind in the artist's order. Same grammar as
-    WWAI's _coerce_clicks, without its item-count cap.
-    """
-    if not isinstance(text, str):
-        raise MarkerContractError(f"{CLICKS_INVALID}: the click state must be text")
-    try:
-        state = json.loads(text)
-    except (ValueError, RecursionError):
-        raise MarkerContractError(f"{CLICKS_INVALID}: the click state is not valid JSON") from None
-    if not isinstance(state, dict) or set(state) != {"source", "frame", "items"}:
-        raise MarkerContractError(
-            f"{CLICKS_INVALID}: the click state must be an object with exactly source, frame and items"
-        )
-    if not isinstance(state["source"], str) or not _HEX64.fullmatch(state["source"]):
-        raise MarkerContractError(f"{CLICKS_INVALID}: source must be 64 lower-case hex characters")
-    frame = _click_int(state["frame"], "frame", 0)
-    items = state["items"]
-    if not isinstance(items, list) or not items:
-        raise MarkerContractError(f"{CLICKS_INVALID}: items must be a non-empty list")
-    return (*split_items(items), frame)
-
-
 def split_items(items):
     """Validate click items; return (include_points, exclude_points, include_boxes,
     exclude_boxes): points as JSON text of [{"x","y"}], boxes as lists of

@@ -25,7 +25,6 @@ from wwai_markers_core import (
     check_keyframes,
     parse_keyframes,
     plan_tracking,
-    split_clicks,
     staged_file_delete,
     tracked_frames,
     unannotated,
@@ -453,48 +452,14 @@ class StagedFileDeleteTest(unittest.TestCase):
         self.assertFalse(os.path.exists(file_path))
 
 
-class SplitClicksTest(unittest.TestCase):
-    """Every row of click_cases.json; WWAI runs the same rows through its own coercer."""
+class KeyframesTest(unittest.TestCase):
+    """The keyframes grammar and the step count, from click_cases.json's keyframe keys."""
 
     with open(
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "click_cases.json"),
         encoding="utf-8",
     ) as _cases_file:
         CASES = json.load(_cases_file)
-
-    def test_valid_rows(self):
-        for row in self.CASES["valid"]:
-            with self.subTest(row["name"]):
-                got = split_clicks(row["canonical"])
-                names = ("include_points", "exclude_points", "include_boxes", "exclude_boxes", "frame")
-                self.assertEqual(dict(zip(names, got)), row["outputs"])
-
-    def test_valid_rows_accept_their_uncanonical_form(self):
-        for row in self.CASES["valid"]:
-            with self.subTest(row["name"]):
-                self.assertEqual(split_clicks(json.dumps(row["state"])), split_clicks(row["canonical"]))
-
-    def test_invalid_rows(self):
-        for row in self.CASES["invalid"]:
-            with self.subTest(row["name"]):
-                with self.assertRaises(MarkerContractError) as caught:
-                    split_clicks(row["state"])
-                self.assertIn(row["refusal"], str(caught.exception))
-
-    def test_an_exclude_box_stays_accepted_on_one_frame(self):
-        state = json.dumps({"source": "a" * 64, "frame": 0, "items": [
-            {"kind": "box", "mode": "exclude", "x": 1, "y": 1, "width": 2, "height": 2}]})
-        self.assertEqual(split_clicks(state)[3], [{"x": 1, "y": 1, "width": 2, "height": 2}])
-
-    def test_non_text_is_refused(self):
-        with self.assertRaises(MarkerContractError):
-            split_clicks({"source": "a" * 64, "frame": 0, "items": []})
-
-
-class KeyframesTest(unittest.TestCase):
-    """The keyframes grammar and the step count, from click_cases.json's keyframe keys."""
-
-    CASES = SplitClicksTest.CASES
 
     @staticmethod
     def _check(row):
