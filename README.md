@@ -66,6 +66,7 @@ media markers and `value` on the scalar ones; WWAI rewrites exactly that key.
 | WWAI Expose Image | `IMAGE` + `MASK` (also reads `.exr`, kept scene-linear and unclamped) |
 | WWAI Expose Audio | `AUDIO` |
 | WWAI Expose Video | `video`, `images`, `audio`, `fps` — see below |
+| WWAI Expose Ripple Job | `images`, `audio`, `frame_rate`, `duration`, `megapixels`, `window_start`, `markers`, `allow_upscale`, `resize_method`, `output_width`, `output_height`: one Ripple job (clip + edited pictures) for WepeNerd's H3 Ripple From Frames — see below |
 | WWAI Expose Image Or Video | `images` (`IMAGE`, one frame for a picture), `media_info` (`WWAI_MEDIA_INFO`: kind + frame rate) |
 | WWAI Expose Mesh | `FILE_3D` |
 
@@ -255,6 +256,18 @@ Utility — category `WWAI/Utility`. Not a marker (no `WWAIExpose` prefix, no
 |---|---|
 | WWAI Refuse Blank Mask | Takes `images`, returns them unchanged. If every pixel of the whole batch is zero, or the batch is empty, it fails with `WWAI_NOTHING_FOUND: Nothing was found, so no mask was made.` instead of letting a mask run save an all-black file. |
 | WWAI Roto Track | Takes `frames`, `model` and `clip` (the SAM3 checkpoint), `keyframes`, `prompt` and eight tuning numbers; returns `mask` (`IMAGE`, white = object) for the output range. Needs ComfyUI's SAM3 nodes. |
+
+### WWAI Expose Ripple Job
+
+`value` holds `{"version":1,"clip","length","megapixels","allow_upscale","resize_method","output_width","output_height","markers":[{"frame","edited"}]}`
+(`clip` and each `edited` are staged names; `length` is 17k + 5 in 5..3592; 1 to 32 markers with unique frames
+below `length`; width and height both 0 or both set, 0..16384; text at most 16 KiB). Anything else fails with
+`WWAI_RIPPLE_JOB_INVALID`, nothing is clamped. Before it hands anything on, every file's hash is checked
+(`WWAI_STAGED_FILE_UNUSABLE`), each edit must load under PIL's pixel limit, and the clip's played packets must
+all carry a pts, sit exactly 1/24 s apart and number `length` (`WWAI_RIPPLE_CLIP_UNUSABLE`). Wire its outputs into
+H3 Ripple From Frames (`images`, `audio`, `frame_rate`, `duration`, `megapixels`, `window_start`, `markers`,
+`allow_upscale`, `resize_method`, `output_width`, `output_height`). The delete door counts every name inside a
+queued job as in use.
 
 ## Staged-file delete door
 

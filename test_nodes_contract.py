@@ -17,8 +17,11 @@ Real-ComfyUI verification is still required for registration and socket
 compatibility; this is the regression net underneath it.
 """
 
+import hashlib
 import inspect
+import json
 import os
+import pathlib
 import shutil
 import sys
 import tempfile
@@ -406,13 +409,13 @@ def setUpModule():
         handle.write(_splat_ply())
 
 
-def _tiny_movie(path, rate=24):
-    """A real two-frame movie, so the frame-rate check reads a real file."""
+def _tiny_movie(path, rate=24, frames=2):
+    """A real movie (two frames unless told), so the frame-rate check reads a real file."""
     with av.open(path, "w", format="mp4") as container:
         stream = container.add_stream("mpeg4", rate=rate)
         stream.width = stream.height = 16
         stream.pix_fmt = "yuv420p"
-        for _ in range(2):
+        for _ in range(frames):
             frame = av.VideoFrame.from_ndarray(np.zeros((16, 16, 3), np.uint8), format="rgb24")
             for packet in stream.encode(frame):
                 container.mux(packet)
@@ -444,7 +447,7 @@ def _written(entry):
 
 ALL_NODES = {
     "WWAIExposeText", "WWAIExposeInt", "WWAIExposeFloat", "WWAIExposeBool", "WWAIExposeCombo", "WWAIExposeImage",
-    "WWAIExposeAudio", "WWAIExposeVideo", "WWAIExposeMesh",
+    "WWAIExposeAudio", "WWAIExposeVideo", "WWAIExposeMesh", "WWAIExposeRippleJob",
     "WWAIExposeOutputImage", "WWAIExposeOutputAudio",
     "WWAIExposeOutputVideo", "WWAIExposeOutputMesh",
     "WWAIRefuseBlankMask",
@@ -1412,6 +1415,71 @@ class RetiredNamesTest(unittest.TestCase):
                         text = fh.read()
                     for n in names:
                         self.assertNotIn(n, text, f"{n} in {f}")
+
+
+class RippleJobTest(unittest.TestCase):
+    """WWAIExposeRippleJob checks every file in the job before it hands anything on."""
+
+    @staticmethod
+    def _stage(write, ext):
+        scratch = os.path.join(_IN, "ripple-scratch." + ext)
+        write(scratch)
+        with open(scratch, "rb") as handle:
+            digest = hashlib.sha256(handle.read()).hexdigest()
+        os.makedirs(os.path.join(_IN, "wwai"), exist_ok=True)
+        name = f"wwai/wwai-{digest}.{ext}"
+        os.replace(scratch, os.path.join(_IN, name))
+        return name
+
+    def _job(self, rate=24, frames=5, edit_bytes=None, **changes):
+        clip = self._stage(lambda path: _tiny_movie(path, rate=rate, frames=frames), "mp4")
+        if edit_bytes is None:
+            edit = self._stage(lambda path: Image.new("RGB", (4, 4), (9, 9, 9)).save(path), "png")
+        else:
+            edit = self._stage(lambda path: pathlib.Path(path).write_bytes(edit_bytes), "png")
+        job = {
+            "version": 1, "clip": clip, "length": 5, "megapixels": 0.25, "allow_upscale": False,
+            "resize_method": "lanczos", "output_width": 0, "output_height": 0,
+            "markers": [{"frame": 2, "edited": edit}],
+        }
+        job.update(changes)
+        return json.dumps(job)
+
+    def _run(self, text):
+        return nodes.WWAIExposeRippleJob().expose(value=text, name="job", description="", required=True)
+
+    def test_a_good_job_feeds_from_frames(self):
+        text = self._job()
+        edit = json.loads(text)["markers"][0]["edited"]
+        images, _audio, rate, duration, mp, start, markers, upscale, method, width, height = self._run(text)
+        self.assertEqual(images.shape[0], 5)
+        self.assertEqual((rate, duration, mp, start, upscale, method, width, height), (24.0, 5 / 24, 0.25, 0, False, "lanczos", 0, 0))
+        self.assertEqual(json.loads(markers), [{"id": 1, "frame": 2, "edited": edit, "edited_at": 2}])
+        self.assertEqual(len(nodes.WWAIExposeRippleJob.RETURN_TYPES), len(nodes.WWAIExposeRippleJob.RETURN_NAMES))
+
+    def test_a_clip_not_at_24_fps_is_refused(self):
+        with self.assertRaisesRegex(MarkerContractError, "1/24 s"):
+            self._run(self._job(rate=30))
+
+    def test_a_clip_with_other_than_length_frames_is_refused(self):
+        with self.assertRaisesRegex(MarkerContractError, "has 3 frames"):
+            self._run(self._job(frames=3))
+
+    def test_an_edit_that_does_not_load_is_refused(self):
+        with self.assertRaisesRegex(MarkerContractError, "WWAI_RIPPLE_EDIT_UNUSABLE"):
+            self._run(self._job(edit_bytes=b"\x89PNG\r\n\x1a\n" + b"x" * 8))
+
+    def test_a_damaged_staged_copy_raises_the_restage_text(self):
+        text = self._job()
+        clip = json.loads(text)["clip"]
+        with open(os.path.join(_IN, clip), "ab") as handle:
+            handle.write(b"junk")
+        with self.assertRaisesRegex(MarkerContractError, "WWAI_STAGED_FILE_UNUSABLE"):
+            self._run(text)
+
+    def test_a_bad_job_text_is_refused_before_any_file_is_read(self):
+        with self.assertRaisesRegex(MarkerContractError, "WWAI_RIPPLE_JOB_INVALID"):
+            self._run("{}")
 
 
 if __name__ == "__main__":

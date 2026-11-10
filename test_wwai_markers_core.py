@@ -24,6 +24,7 @@ from wwai_markers_core import (
     require_single,
     check_keyframes,
     parse_keyframes,
+    parse_ripple_manifest,
     plan_tracking,
     staged_file_delete,
     tracked_frames,
@@ -450,6 +451,19 @@ class StagedFileDeleteTest(unittest.TestCase):
                 (200, {"wwai_staged_file": "deleted"}),
             )
         self.assertFalse(os.path.exists(file_path))
+    def test_a_clip_named_only_inside_a_queued_manifest_is_in_use(self):
+        status, body = self._call(f"wwai-{'a' * 64}.mp4", queued={_ripple()})
+        self.assertEqual((status, body["wwai_staged_file"]), (409, "in_use"))
+        status, body = self._call(f"wwai-{'b' * 64}.png", queued={_ripple()})
+        self.assertEqual((status, body["wwai_staged_file"]), (409, "in_use"))
+
+    def test_a_manifest_naming_another_file_does_not_block(self):
+        self._put(f"wwai-{'d' * 64}.mp4")
+        self.assertEqual(self._call(f"wwai-{'d' * 64}.mp4", queued={_ripple()})[0], 200)
+
+    def test_a_queued_text_that_is_no_manifest_is_ignored(self):
+        self._put(f"wwai-{'a' * 64}.mp4")
+        self.assertEqual(self._call(f"wwai-{'a' * 64}.mp4", queued={"{not json"})[0], 200)
 
 
 class KeyframesTest(unittest.TestCase):
@@ -537,6 +551,83 @@ class KeyframesTest(unittest.TestCase):
         keyframes, frame_range = parse_keyframes(state)
         self.assertEqual(frame_range, None)
         self.assertEqual([(k.frame, k.object) for k in keyframes], [(3, 1)])
+
+
+def _ripple(**changes):
+    """A valid ripple manifest as text, with *changes* applied."""
+    manifest = {
+        "version": 1,
+        "clip": f"wwai/wwai-{'a' * 64}.mp4",
+        "length": 22,
+        "megapixels": 0.25,
+        "allow_upscale": False,
+        "resize_method": "lanczos",
+        "output_width": 0,
+        "output_height": 0,
+        "markers": [
+            {"frame": 0, "edited": f"wwai/wwai-{'b' * 64}.png"},
+            {"frame": 21, "edited": f"wwai/wwai-{'c' * 64}.png"},
+        ],
+    }
+    manifest.update(changes)
+    return json.dumps(manifest)
+
+
+class RippleManifestTest(unittest.TestCase):
+    def _refused(self, text):
+        with self.assertRaises(MarkerContractError) as caught:
+            parse_ripple_manifest(text)
+        self.assertTrue(str(caught.exception).startswith("WWAI_RIPPLE_JOB_INVALID: "))
+
+    def test_a_valid_manifest_parses(self):
+        manifest = parse_ripple_manifest(_ripple())
+        self.assertEqual(manifest["length"], 22)
+        self.assertEqual([m["frame"] for m in manifest["markers"]], [0, 21])
+
+    def test_text_over_16_kib_is_refused_before_parsing(self):
+        with mock.patch.object(wwai_markers_core.json, "loads") as loads:
+            self._refused(" " * (16 * 1024 + 1))
+        loads.assert_not_called()
+
+    def test_a_bad_name_is_refused(self):
+        self._refused(_ripple(clip="wwai/wwai-short.mp4"))
+        self._refused(_ripple(markers=[{"frame": 0, "edited": "../../etc/passwd"}]))
+
+    def test_a_frame_outside_the_length_is_refused(self):
+        self._refused(_ripple(markers=[{"frame": 22, "edited": f"wwai/wwai-{'b' * 64}.png"}]))
+
+    def test_the_33rd_edit_is_refused_and_the_32nd_is_not(self):
+        def edits(count):
+            return [{"frame": i, "edited": f"wwai/wwai-{'b' * 64}.png"} for i in range(count)]
+
+        parse_ripple_manifest(_ripple(length=39, markers=edits(32)))
+        self._refused(_ripple(length=39, markers=edits(33)))
+
+    def test_anything_else_outside_the_schema_is_refused(self):
+        edit = {"frame": 0, "edited": f"wwai/wwai-{'b' * 64}.png"}
+        for bad in (
+            "not json",
+            "[]",
+            _ripple(version=2),
+            _ripple(length=23),  # not 17k + 5
+            _ripple(length=3593),
+            _ripple(megapixels=0),
+            _ripple(megapixels=True),
+            _ripple(allow_upscale="no"),
+            _ripple(resize_method="spline"),
+            _ripple(output_width=512),  # width without height
+            _ripple(output_width=16385, output_height=512),
+            _ripple(markers=[]),
+            _ripple(markers=[edit, edit]),  # repeated frame
+            _ripple(markers=[{"frame": 1.5, "edited": edit["edited"]}]),
+            _ripple(markers=[{"frame": 0, "edited": edit["edited"], "x": 1}]),
+        ):
+            with self.subTest(bad[:80]):
+                self._refused(bad)
+        extra = json.loads(_ripple())
+        extra["surprise"] = 1
+        self._refused(json.dumps(extra))
+
 
 
 if __name__ == "__main__":

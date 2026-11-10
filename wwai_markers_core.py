@@ -230,7 +230,9 @@ def staged_file_delete(
     if not isinstance(filename, str) or _DOOR_NAME.fullmatch(filename) is None:
         return answer(400, "refused")
     try:
-        queued = {unannotated(value) for value in queued_input_values()}
+        values = queued_input_values()
+        # A Ripple job names its files inside one string value: count those too.
+        queued = {unannotated(value) for value in values}.union(*map(ripple_manifest_names, values))
     except Exception as exc:  # the host's queue failed: refuse, typed and loud
         return answer(500, "failed", detail=f"cannot read the prompt queue: {exc}")
     if f"wwai/{filename}" in queued:
@@ -383,6 +385,82 @@ def parse_keyframes(text):
         if frame_range[0] > frame_range[1]:
             raise _keyframes_invalid("in_after_out", f"In {frame_range[0]} is after Out {frame_range[1]}")
     return keyframes, frame_range
+
+
+# The Ripple job text a WWAIExposeRippleJob reads (WWAI HRP0 schema v1). The
+# resize methods and bounds are From Frames' own (WepeNerd ripple_core.py /
+# ripple_node.py); a value outside them is refused here, never clamped.
+RIPPLE_JOB_INVALID = "WWAI_RIPPLE_JOB_INVALID"
+RIPPLE_MAX_TEXT_BYTES = 16 * 1024
+RIPPLE_MAX_EDITS = 32
+RIPPLE_RESIZE_METHODS = ("lanczos", "bicubic", "bilinear", "nearest-exact", "area")
+_RIPPLE_KEYS = {"version", "clip", "length", "megapixels", "allow_upscale", "resize_method", "output_width", "output_height", "markers"}
+
+
+def _ripple_invalid(detail):
+    return MarkerContractError(f"{RIPPLE_JOB_INVALID}: {detail}")
+
+
+def _ripple_int(value, what, low, high):
+    if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
+        raise _ripple_invalid(f"{what} must be a whole number from {low} to {high}")
+    return value
+
+
+def parse_ripple_manifest(text):
+    """The Ripple job text as a dict (schema in plans/2419 HRP0). Refuses text over
+    16 KiB before parsing, then anything outside the schema; nothing is clamped."""
+    if not isinstance(text, str):
+        raise _ripple_invalid("the job must be text")
+    if len(text.encode("utf-8")) > RIPPLE_MAX_TEXT_BYTES:
+        raise _ripple_invalid(f"the job text is over {RIPPLE_MAX_TEXT_BYTES} bytes")
+    try:
+        job = json.loads(text)
+    except (ValueError, RecursionError):
+        raise _ripple_invalid("the job is not valid JSON") from None
+    if not isinstance(job, dict) or set(job) != _RIPPLE_KEYS:
+        raise _ripple_invalid("the job must have exactly " + ", ".join(sorted(_RIPPLE_KEYS)))
+    if job["version"] != 1 or isinstance(job["version"], bool):
+        raise _ripple_invalid("version must be 1")
+    if not is_staged_name(job["clip"]):
+        raise _ripple_invalid("clip must be a staged file name")
+    length = _ripple_int(job["length"], "length", 5, 3592)
+    if (length - 5) % 17:
+        raise _ripple_invalid("length must be 17k + 5 frames")
+    megapixels = job["megapixels"]
+    if isinstance(megapixels, bool) or not isinstance(megapixels, (int, float)) or not 0.001 <= megapixels <= 268.435456:
+        raise _ripple_invalid("megapixels must be a number from 0.001 to 268.435456")
+    if not isinstance(job["allow_upscale"], bool):
+        raise _ripple_invalid("allow_upscale must be true or false")
+    if job["resize_method"] not in RIPPLE_RESIZE_METHODS:
+        raise _ripple_invalid("resize_method must be one of " + ", ".join(RIPPLE_RESIZE_METHODS))
+    width = _ripple_int(job["output_width"], "output_width", 0, 16384)
+    height = _ripple_int(job["output_height"], "output_height", 0, 16384)
+    if (width == 0) != (height == 0):
+        raise _ripple_invalid("output_width and output_height must both be set or both be 0")
+    markers = job["markers"]
+    if not isinstance(markers, list) or not 1 <= len(markers) <= RIPPLE_MAX_EDITS:
+        raise _ripple_invalid(f"markers must be a list of 1 to {RIPPLE_MAX_EDITS} edits")
+    frames = set()
+    for marker in markers:
+        if not isinstance(marker, dict) or set(marker) != {"frame", "edited"}:
+            raise _ripple_invalid("each marker has exactly frame and edited")
+        frame = _ripple_int(marker["frame"], "frame", 0, length - 1)
+        if frame in frames:
+            raise _ripple_invalid(f"two edits are for frame {frame}")
+        frames.add(frame)
+        if not is_staged_name(marker["edited"]):
+            raise _ripple_invalid("edited must be a staged file name")
+    return job
+
+
+def ripple_manifest_names(text):
+    """The staged names a queued value holds if it is a Ripple job, else an empty set."""
+    try:
+        job = parse_ripple_manifest(text)
+    except MarkerContractError:
+        return set()
+    return {job["clip"], *(marker["edited"] for marker in job["markers"])}
 
 
 def check_keyframes(parsed, frame_count, prompt_set):

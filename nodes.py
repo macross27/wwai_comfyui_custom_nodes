@@ -39,7 +39,9 @@ from .wwai_markers_core import (
     copy_file_verbatim,
     extension_of,
     is_staged_name,
+    RIPPLE_RESIZE_METHODS,
     parse_keyframes,
+    parse_ripple_manifest,
     plan_tracking,
     require_marker_name,
     require_single,
@@ -729,6 +731,90 @@ class WWAIExposeImageOrVideo(FileMarkerMixin):
         return (images, {"kind": "video", "fps": frame_rate})
 
 
+def check_ripple_clip(path, length):
+    """Refuse a clip whose played packets are not `length` frames exactly 1/24 s
+    apart, each with a pts (the frames the Ripple job's markers count)."""
+    try:
+        with av.open(path) as container:
+            stream = container.streams.video[0]
+            ticks = sorted(
+                (packet.pts for packet in container.demux(stream) if packet.size), key=lambda pts: (pts is None, pts)
+            )
+            time_base = stream.time_base
+    except (av.error.FFmpegError, IndexError) as exc:
+        raise MarkerContractError(f"WWAI_RIPPLE_CLIP_UNUSABLE: the clip cannot be read as a movie ({exc})") from exc
+    if None in ticks:
+        raise MarkerContractError("WWAI_RIPPLE_CLIP_UNUSABLE: a frame of the clip has no time stamp")
+    if len(ticks) != length:
+        raise MarkerContractError(f"WWAI_RIPPLE_CLIP_UNUSABLE: the clip has {len(ticks)} frames, the job says {length}")
+    if any((b - a) * time_base != Fraction(1, 24) for a, b in zip(ticks, ticks[1:])):
+        raise MarkerContractError("WWAI_RIPPLE_CLIP_UNUSABLE: the clip's frames are not exactly 1/24 s apart")
+
+
+def check_ripple_edit(path):
+    """Refuse an edit picture over PIL's pixel limit or one that does not fully load."""
+    try:
+        with Image.open(path) as img:
+            if Image.MAX_IMAGE_PIXELS is not None and img.width * img.height > Image.MAX_IMAGE_PIXELS:
+                raise MarkerContractError("WWAI_RIPPLE_EDIT_UNUSABLE: an edited picture is over the pixel limit")
+            img.load()
+    except (OSError, SyntaxError, Image.DecompressionBombError) as exc:
+        raise MarkerContractError(f"WWAI_RIPPLE_EDIT_UNUSABLE: an edited picture cannot be loaded ({exc})") from exc
+
+
+class WWAIExposeRippleJob:
+    """One Ripple job (a short clip, the edited pictures and the frame each belongs
+    to) as one text (grammar in wwai_markers_core.parse_ripple_manifest). Checks every
+    file, then feeds WepeNerd's From Frames and Apply as their Ripple Clip would."""
+
+    CATEGORY = INPUT_CATEGORY
+    FUNCTION = "expose"
+    RETURN_TYPES = (
+        IMAGE_TYPE, AUDIO_TYPE, "FLOAT", "FLOAT", "FLOAT", "INT", "STRING", "BOOLEAN",
+        list(RIPPLE_RESIZE_METHODS), "INT", "INT",
+    )
+    RETURN_NAMES = (
+        "images", "audio", "frame_rate", "duration", "megapixels", "window_start", "markers",
+        "allow_upscale", "resize_method", "output_width", "output_height",
+    )
+    DESCRIPTION = "Marks a Ripple job WWAI supplies: wire it into H3 Ripple From Frames."
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "value": ("STRING", {"multiline": True, "default": ""}),
+                **metadata_widgets(),
+                **required_widget(),
+            }
+        }
+
+    def expose(self, value, name, description, required):
+        require_marker_name(name, type(self).__name__)
+        job = parse_ripple_manifest(value)
+        clip_path = folder_paths.get_annotated_filepath(job["clip"])
+        check_staged_file(clip_path, job["clip"])
+        for marker in job["markers"]:
+            edit_path = folder_paths.get_annotated_filepath(marker["edited"])
+            check_staged_file(edit_path, marker["edited"])
+            check_ripple_edit(edit_path)
+        length = job["length"]
+        check_ripple_clip(clip_path, length)
+        _, images, audio, _ = load_video_file(job["clip"])
+        if len(images) != length:
+            raise MarkerContractError(f"WWAI_RIPPLE_CLIP_UNUSABLE: the clip decodes to {len(images)} frames, the job says {length}")
+        markers = json.dumps(
+            [
+                {"id": i + 1, "frame": m["frame"], "edited": m["edited"], "edited_at": m["frame"]}
+                for i, m in enumerate(job["markers"])
+            ]
+        )
+        return (
+            images, audio, 24.0, length / 24, float(job["megapixels"]), 0, markers,
+            job["allow_upscale"], job["resize_method"], job["output_width"], job["output_height"],
+        )
+
+
 class WWAIExposeAudio(FileMarkerMixin):
     CATEGORY = INPUT_CATEGORY
     FUNCTION = "expose"
@@ -1297,6 +1383,7 @@ if MEDIA_PAYLOADS_IMPORT_ERROR is None:
     NODE_CLASS_MAPPINGS.update(
         {
             "WWAIExposeVideo": WWAIExposeVideo,
+            "WWAIExposeRippleJob": WWAIExposeRippleJob,
             "WWAIExposeImageOrVideo": WWAIExposeImageOrVideo,
             "WWAIExposeOutputImageOrVideo": WWAIExposeOutputImageOrVideo,
             "WWAIExposeMesh": WWAIExposeMesh,
@@ -1308,6 +1395,7 @@ if MEDIA_PAYLOADS_IMPORT_ERROR is None:
     NODE_DISPLAY_NAME_MAPPINGS.update(
         {
             "WWAIExposeVideo": "WWAI Expose Video",
+            "WWAIExposeRippleJob": "WWAI Expose Ripple Job",
             "WWAIExposeImageOrVideo": "WWAI Expose Image Or Video",
             "WWAIExposeOutputImageOrVideo": "WWAI Expose Output Image Or Video",
             "WWAIExposeMesh": "WWAI Expose Mesh",
