@@ -10,11 +10,13 @@ therefore unit-testable on a bare Python, with no ComfyUI installed.
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import shutil
 import stat
 from collections import namedtuple
+from fractions import Fraction
 
 # Containers that carry Gaussian Splat / point-cloud attributes rather than
 # triangle geometry. Round-tripping one of these through a mesh serializer
@@ -387,14 +389,21 @@ def parse_keyframes(text):
     return keyframes, frame_range
 
 
-# The Ripple job text a WWAIExposeRippleJob reads (WWAI HRP0 schema v1). The
-# resize methods and bounds are From Frames' own (WepeNerd ripple_core.py /
-# ripple_node.py); a value outside them is refused here, never clamped.
+# The Ripple job text a WWAIExposeRippleJob reads (WWAI HRP4 schema v2: the ORIGINAL
+# movie, its time base, the window on its 24 fps grid, the size to decode at, and each
+# edit's window frame and pts). The resize methods and bounds are From Frames' own
+# (WepeNerd ripple_core.py / ripple_node.py); a value outside them is refused here,
+# never clamped.
 RIPPLE_JOB_INVALID = "WWAI_RIPPLE_JOB_INVALID"
 RIPPLE_MAX_TEXT_BYTES = 16 * 1024
 RIPPLE_MAX_EDITS = 32
 RIPPLE_RESIZE_METHODS = ("lanczos", "bicubic", "bilinear", "nearest-exact", "area")
-_RIPPLE_KEYS = {"version", "clip", "length", "megapixels", "allow_upscale", "resize_method", "output_width", "output_height", "markers"}
+RIPPLE_GRID_FPS = 24
+_RIPPLE_KEYS = {
+    "version", "video", "time_base", "window_start", "length", "decode_width", "decode_height",
+    "megapixels", "allow_upscale", "resize_method", "output_width", "output_height", "markers",
+}
+_TIME_BASE = re.compile(r"[1-9][0-9]*/[1-9][0-9]*")
 
 
 def _ripple_invalid(detail):
@@ -408,8 +417,9 @@ def _ripple_int(value, what, low, high):
 
 
 def parse_ripple_manifest(text):
-    """The Ripple job text as a dict (schema in plans/2419 HRP0). Refuses text over
-    16 KiB before parsing, then anything outside the schema; nothing is clamped."""
+    """The Ripple job text as a dict (schema v2, WWAI plan 2418 HRP4). Refuses text over
+    16 KiB before parsing, then anything outside the schema; nothing is clamped. A
+    version 1 job (a WWAI-cut clip) is refused like any other: the clip path is gone."""
     if not isinstance(text, str):
         raise _ripple_invalid("the job must be text")
     if len(text.encode("utf-8")) > RIPPLE_MAX_TEXT_BYTES:
@@ -420,13 +430,19 @@ def parse_ripple_manifest(text):
         raise _ripple_invalid("the job is not valid JSON") from None
     if not isinstance(job, dict) or set(job) != _RIPPLE_KEYS:
         raise _ripple_invalid("the job must have exactly " + ", ".join(sorted(_RIPPLE_KEYS)))
-    if job["version"] != 1 or isinstance(job["version"], bool):
-        raise _ripple_invalid("version must be 1")
-    if not is_staged_name(job["clip"]):
-        raise _ripple_invalid("clip must be a staged file name")
+    if job["version"] != 2 or isinstance(job["version"], bool):
+        raise _ripple_invalid("version must be 2")
+    if not is_staged_name(job["video"]):
+        raise _ripple_invalid("video must be a staged file name")
+    if not isinstance(job["time_base"], str) or not _TIME_BASE.fullmatch(job["time_base"]):
+        raise _ripple_invalid('time_base must be "n/d" with whole numbers above 0')
+    # From Frames' own window_start bound (ripple_node.py: io.Int.Input max).
+    _ripple_int(job["window_start"], "window_start", 0, 10_000_000)
     length = _ripple_int(job["length"], "length", 5, 3592)
     if (length - 5) % 17:
         raise _ripple_invalid("length must be 17k + 5 frames")
+    _ripple_int(job["decode_width"], "decode_width", 1, 16384)
+    _ripple_int(job["decode_height"], "decode_height", 1, 16384)
     megapixels = job["megapixels"]
     if isinstance(megapixels, bool) or not isinstance(megapixels, (int, float)) or not 0.001 <= megapixels <= 268.435456:
         raise _ripple_invalid("megapixels must be a number from 0.001 to 268.435456")
@@ -441,17 +457,64 @@ def parse_ripple_manifest(text):
     markers = job["markers"]
     if not isinstance(markers, list) or not 1 <= len(markers) <= RIPPLE_MAX_EDITS:
         raise _ripple_invalid(f"markers must be a list of 1 to {RIPPLE_MAX_EDITS} edits")
-    frames = set()
+    frames, stamps = set(), set()
     for marker in markers:
-        if not isinstance(marker, dict) or set(marker) != {"frame", "edited"}:
-            raise _ripple_invalid("each marker has exactly frame and edited")
+        if not isinstance(marker, dict) or set(marker) != {"frame", "pts", "edited"}:
+            raise _ripple_invalid("each marker has exactly frame, pts and edited")
         frame = _ripple_int(marker["frame"], "frame", 0, length - 1)
         if frame in frames:
             raise _ripple_invalid(f"two edits are for frame {frame}")
         frames.add(frame)
+        pts = marker["pts"]
+        if not isinstance(pts, int) or isinstance(pts, bool):
+            raise _ripple_invalid("pts must be a whole number")
+        if pts in stamps:
+            raise _ripple_invalid(f"two edits are for pts {pts}")
+        stamps.add(pts)
         if not is_staged_name(marker["edited"]):
             raise _ripple_invalid("edited must be a staged file name")
     return job
+
+
+# The frame rule (WWAI plan 2419 HRP0), the same one WWAI's backend/core/ripple_job.py
+# runs; ripple_cases.json (byte-identical to WWAI's fixtures/comfyui_ripple_cases.json)
+# pins both. Units: pts, next_pts and p0 are ticks of the stream's time base; p0 is the
+# first DECODED frame's pts. Grid frame k shows the source frame playing from pts to
+# next_pts iff (pts - p0)*tb*24 < k + 1/2 <= (next_pts - p0)*tb*24, smallest such k.
+RIPPLE_VIDEO_UNUSABLE = "WWAI_RIPPLE_VIDEO_UNUSABLE"
+_HALF = Fraction(1, 2)
+
+
+def ripple_grid_frame(pts, next_pts, p0, time_base):
+    """The first grid frame that shows the source frame playing from *pts* to *next_pts*,
+    or None when none does (a 30 fps frame the 24 fps grid skips, or one before p0)."""
+    rate = time_base * RIPPLE_GRID_FPS
+    k = math.floor((pts - p0) * rate - _HALF) + 1
+    return k if k >= 0 and k + _HALF <= (next_pts - p0) * rate else None
+
+
+def ripple_grid_count(end_pts, p0, time_base):
+    """How many grid frames a shot has whose last frame ends at *end_pts*."""
+    return max(0, math.floor((end_pts - p0) * time_base * RIPPLE_GRID_FPS - _HALF) + 1)
+
+
+def ripple_grid_slots(pts, p0, end_pts, time_base):
+    """The source pts every grid frame of the shot shows, in grid order (a frame shown
+    twice appears twice). *pts* are the played frames' stamps in any order, *end_pts*
+    where the last one stops. Refuses stamps the rule cannot place one way."""
+    ordered = sorted(pts)
+    if len(set(ordered)) != len(ordered):
+        raise MarkerContractError(f"{RIPPLE_VIDEO_UNUSABLE}: two frames of the movie share one time stamp")
+    if not ordered or end_pts <= ordered[-1]:
+        raise MarkerContractError(f"{RIPPLE_VIDEO_UNUSABLE}: the movie's last frame has no length")
+    if p0 not in ordered:
+        raise MarkerContractError(f"{RIPPLE_VIDEO_UNUSABLE}: the first decoded frame has no packet")
+    rate = time_base * RIPPLE_GRID_FPS
+    slots = []
+    for p, next_pts in zip(ordered, ordered[1:] + [end_pts]):
+        while len(slots) + _HALF <= (next_pts - p0) * rate:
+            slots.append(p)
+    return slots
 
 
 def ripple_manifest_names(text):
@@ -460,7 +523,7 @@ def ripple_manifest_names(text):
         job = parse_ripple_manifest(text)
     except MarkerContractError:
         return set()
-    return {job["clip"], *(marker["edited"] for marker in job["markers"])}
+    return {job["video"], *(marker["edited"] for marker in job["markers"])}
 
 
 def check_keyframes(parsed, frame_count, prompt_set):

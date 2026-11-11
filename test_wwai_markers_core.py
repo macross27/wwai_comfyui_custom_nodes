@@ -12,6 +12,7 @@ import sys
 import tempfile
 import types
 import unittest
+from fractions import Fraction
 from unittest import mock
 
 import wwai_markers_core
@@ -25,6 +26,9 @@ from wwai_markers_core import (
     check_keyframes,
     parse_keyframes,
     parse_ripple_manifest,
+    ripple_grid_count,
+    ripple_grid_frame,
+    ripple_grid_slots,
     plan_tracking,
     staged_file_delete,
     tracked_frames,
@@ -554,19 +558,23 @@ class KeyframesTest(unittest.TestCase):
 
 
 def _ripple(**changes):
-    """A valid ripple manifest as text, with *changes* applied."""
+    """A valid v2 ripple manifest as text, with *changes* applied."""
     manifest = {
-        "version": 1,
-        "clip": f"wwai/wwai-{'a' * 64}.mp4",
+        "version": 2,
+        "video": f"wwai/wwai-{'a' * 64}.mp4",
+        "time_base": "1/12288",
+        "window_start": 3,
         "length": 22,
+        "decode_width": 64,
+        "decode_height": 36,
         "megapixels": 0.25,
         "allow_upscale": False,
         "resize_method": "lanczos",
         "output_width": 0,
         "output_height": 0,
         "markers": [
-            {"frame": 0, "edited": f"wwai/wwai-{'b' * 64}.png"},
-            {"frame": 21, "edited": f"wwai/wwai-{'c' * 64}.png"},
+            {"frame": 0, "pts": 1536, "edited": f"wwai/wwai-{'b' * 64}.png"},
+            {"frame": 21, "pts": 12288, "edited": f"wwai/wwai-{'c' * 64}.png"},
         ],
     }
     manifest.update(changes)
@@ -581,8 +589,17 @@ class RippleManifestTest(unittest.TestCase):
 
     def test_a_valid_manifest_parses(self):
         manifest = parse_ripple_manifest(_ripple())
-        self.assertEqual(manifest["length"], 22)
-        self.assertEqual([m["frame"] for m in manifest["markers"]], [0, 21])
+        self.assertEqual((manifest["length"], manifest["window_start"], manifest["time_base"]), (22, 3, "1/12288"))
+        self.assertEqual([(m["frame"], m["pts"]) for m in manifest["markers"]], [(0, 1536), (21, 12288)])
+
+    def test_a_version_1_job_is_refused(self):
+        v1 = {
+            "version": 1, "clip": f"wwai/wwai-{'a' * 64}.mp4", "length": 22, "megapixels": 0.25,
+            "allow_upscale": False, "resize_method": "lanczos", "output_width": 0, "output_height": 0,
+            "markers": [{"frame": 0, "edited": f"wwai/wwai-{'b' * 64}.png"}],
+        }
+        self._refused(json.dumps(v1))
+        self._refused(_ripple(version=1))
 
     def test_text_over_16_kib_is_refused_before_parsing(self):
         with mock.patch.object(wwai_markers_core.json, "loads") as loads:
@@ -590,27 +607,35 @@ class RippleManifestTest(unittest.TestCase):
         loads.assert_not_called()
 
     def test_a_bad_name_is_refused(self):
-        self._refused(_ripple(clip="wwai/wwai-short.mp4"))
-        self._refused(_ripple(markers=[{"frame": 0, "edited": "../../etc/passwd"}]))
+        self._refused(_ripple(video="wwai/wwai-short.mp4"))
+        self._refused(_ripple(markers=[{"frame": 0, "pts": 0, "edited": "../../etc/passwd"}]))
 
     def test_a_frame_outside_the_length_is_refused(self):
-        self._refused(_ripple(markers=[{"frame": 22, "edited": f"wwai/wwai-{'b' * 64}.png"}]))
+        self._refused(_ripple(markers=[{"frame": 22, "pts": 0, "edited": f"wwai/wwai-{'b' * 64}.png"}]))
 
     def test_the_33rd_edit_is_refused_and_the_32nd_is_not(self):
         def edits(count):
-            return [{"frame": i, "edited": f"wwai/wwai-{'b' * 64}.png"} for i in range(count)]
+            return [{"frame": i, "pts": i * 512, "edited": f"wwai/wwai-{'b' * 64}.png"} for i in range(count)]
 
         parse_ripple_manifest(_ripple(length=39, markers=edits(32)))
         self._refused(_ripple(length=39, markers=edits(33)))
 
     def test_anything_else_outside_the_schema_is_refused(self):
-        edit = {"frame": 0, "edited": f"wwai/wwai-{'b' * 64}.png"}
+        edit = {"frame": 0, "pts": 0, "edited": f"wwai/wwai-{'b' * 64}.png"}
         for bad in (
             "not json",
             "[]",
-            _ripple(version=2),
+            _ripple(version=3),
+            _ripple(version=True),
+            _ripple(time_base="1/0"),
+            _ripple(time_base="0.5"),
+            _ripple(time_base=24),
+            _ripple(window_start=-1),
+            _ripple(window_start=10_000_001),
             _ripple(length=23),  # not 17k + 5
             _ripple(length=3593),
+            _ripple(decode_width=0),
+            _ripple(decode_height=16385),
             _ripple(megapixels=0),
             _ripple(megapixels=True),
             _ripple(allow_upscale="no"),
@@ -619,8 +644,12 @@ class RippleManifestTest(unittest.TestCase):
             _ripple(output_width=16385, output_height=512),
             _ripple(markers=[]),
             _ripple(markers=[edit, edit]),  # repeated frame
-            _ripple(markers=[{"frame": 1.5, "edited": edit["edited"]}]),
-            _ripple(markers=[{"frame": 0, "edited": edit["edited"], "x": 1}]),
+            _ripple(markers=[edit, {**edit, "frame": 1}]),  # repeated pts
+            _ripple(markers=[{**edit, "frame": 1.5}]),
+            _ripple(markers=[{**edit, "pts": 1.5}]),
+            _ripple(markers=[{**edit, "pts": True}]),
+            _ripple(markers=[{"frame": 0, "edited": edit["edited"]}]),  # no pts
+            _ripple(markers=[{**edit, "x": 1}]),
         ):
             with self.subTest(bad[:80]):
                 self._refused(bad)
@@ -628,6 +657,43 @@ class RippleManifestTest(unittest.TestCase):
         extra["surprise"] = 1
         self._refused(json.dumps(extra))
 
+
+class RippleGridTest(unittest.TestCase):
+    """The frame rule, from ripple_cases.json (byte-identical to WWAI's comfyui_ripple_cases.json)."""
+
+    with open(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "ripple_cases.json"),
+        encoding="utf-8",
+    ) as _cases_file:
+        CASES = json.load(_cases_file)
+
+    def test_each_frame_lands_on_its_grid_frame(self):
+        for row in self.CASES["grid"]:
+            with self.subTest(row["name"]):
+                tb = Fraction(row["time_base"])
+                ends = row["pts"][1:] + [row["end_pts"]]
+                got = [ripple_grid_frame(p, n, row["p0"], tb) for p, n in zip(row["pts"], ends)]
+                self.assertEqual(got, row["frames"])
+                self.assertEqual(ripple_grid_count(row["end_pts"], row["p0"], tb), row["count"])
+
+    def test_the_slots_agree_with_the_frames_and_the_count(self):
+        for row in self.CASES["grid"]:
+            with self.subTest(row["name"]):
+                # Packets come in decode order: the rule sorts them itself.
+                slots = ripple_grid_slots(list(reversed(row["pts"])), row["p0"], row["end_pts"], Fraction(row["time_base"]))
+                self.assertEqual(len(slots), row["count"])
+                for pts, frame in zip(row["pts"], row["frames"]):
+                    if frame is None:
+                        self.assertNotIn(pts, slots)
+                    else:
+                        self.assertEqual(slots.index(pts), frame)
+
+    def test_stamps_the_rule_cannot_place_are_refused(self):
+        tb = Fraction(1, 12288)
+        for pts, p0, end in (([0, 512, 512], 0, 1024), ([0, 512], 0, 512), ([], 0, 512), ([0, 512], 256, 1024)):
+            with self.subTest(pts=pts, p0=p0, end=end):
+                with self.assertRaisesRegex(MarkerContractError, "^WWAI_RIPPLE_VIDEO_UNUSABLE: "):
+                    ripple_grid_slots(pts, p0, end, tb)
 
 
 if __name__ == "__main__":

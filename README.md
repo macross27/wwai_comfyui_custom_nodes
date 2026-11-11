@@ -66,7 +66,7 @@ media markers and `value` on the scalar ones; WWAI rewrites exactly that key.
 | WWAI Expose Image | `IMAGE` + `MASK` (also reads `.exr`, kept scene-linear and unclamped) |
 | WWAI Expose Audio | `AUDIO` |
 | WWAI Expose Video | `video`, `images`, `audio`, `fps` — see below |
-| WWAI Expose Ripple Job | `images`, `audio`, `frame_rate`, `duration`, `megapixels`, `window_start`, `markers`, `allow_upscale`, `resize_method`, `output_width`, `output_height`: one Ripple job (clip + edited pictures) for WepeNerd's H3 Ripple From Frames — see below |
+| WWAI Expose Ripple Job | `images`, `audio`, `frame_rate`, `duration`, `megapixels`, `window_start`, `markers`, `allow_upscale`, `resize_method`, `output_width`, `output_height`: one Ripple job (the original movie + edited pictures, the window cut in memory) for WepeNerd's H3 Ripple From Frames — see below |
 | WWAI Expose Image Or Video | `images` (`IMAGE`, one frame for a picture), `media_info` (`WWAI_MEDIA_INFO`: kind + frame rate) |
 | WWAI Expose Mesh | `FILE_3D` |
 
@@ -259,15 +259,24 @@ Utility — category `WWAI/Utility`. Not a marker (no `WWAIExpose` prefix, no
 
 ### WWAI Expose Ripple Job
 
-`value` holds `{"version":1,"clip","length","megapixels","allow_upscale","resize_method","output_width","output_height","markers":[{"frame","edited"}]}`
-(`clip` and each `edited` are staged names; `length` is 17k + 5 in 5..3592; 1 to 32 markers with unique frames
-below `length`; width and height both 0 or both set, 0..16384; text at most 16 KiB). Anything else fails with
-`WWAI_RIPPLE_JOB_INVALID`, nothing is clamped. Before it hands anything on, every file's hash is checked
-(`WWAI_STAGED_FILE_UNUSABLE`), each edit must load under PIL's pixel limit, and the clip's played packets must
-all carry a pts, sit exactly 1/24 s apart and number `length` (`WWAI_RIPPLE_CLIP_UNUSABLE`). Wire its outputs into
-H3 Ripple From Frames (`images`, `audio`, `frame_rate`, `duration`, `megapixels`, `window_start`, `markers`,
-`allow_upscale`, `resize_method`, `output_width`, `output_height`). The delete door counts every name inside a
-queued job as in use.
+`value` holds `{"version":2,"video","time_base","window_start","length","decode_width","decode_height","megapixels","allow_upscale","resize_method","output_width","output_height","markers":[{"frame","pts","edited"}]}`
+(`video` is the ORIGINAL movie and each `edited` a picture, both staged names; `time_base` is the movie's `"n/d"`;
+`window_start` is the window's first frame on the movie's 24 fps grid, 0..10000000; `length` is 17k + 5 in 5..3592;
+decode width and height 1..16384; 1 to 32 markers with unique frames below `length`, unique whole-number `pts` in
+`time_base` ticks; output width and height both 0 or both set, 0..16384; text at most 16 KiB). Anything else, a
+version 1 job included, fails with `WWAI_RIPPLE_JOB_INVALID`; nothing is clamped. Before it hands anything on, every
+file's hash is checked (`WWAI_STAGED_FILE_UNUSABLE`) and each edit must load under PIL's pixel limit
+(`WWAI_RIPPLE_EDIT_UNUSABLE`). It then reads the movie's played packets (demux only), finds the first decoded frame
+and rebuilds the 24 fps grid with the frame rule in `wwai_markers_core` (`ripple_grid_frame` / `ripple_grid_slots`;
+`ripple_cases.json` pins it and is byte-identical to WWAI's `backend/tests/fixtures/comfyui_ripple_cases.json`).
+When WWAI's reading and this one disagree it fails with `WWAI_RIPPLE_WINDOW_MISMATCH` naming both sides: another time
+base, a window past the shot's end, an edit whose pts is no frame of the movie or lands on another grid frame (or on
+none), or a decode size larger than the movie. Nothing is shifted to make them agree. A movie it cannot read, one
+with a frame without a time stamp, a last frame without a duration, or a stored rotation fails with
+`WWAI_RIPPLE_VIDEO_UNUSABLE`. Only the window is decoded (from the keyframe before it), resized to the decode size,
+and its sound (the first track) cut to the same span, all in memory. Wire its outputs into H3 Ripple From Frames
+(`images`, `audio`, `frame_rate`, `duration`, `megapixels`, `window_start`, `markers`, `allow_upscale`,
+`resize_method`, `output_width`, `output_height`). The delete door counts every name inside a queued job as in use.
 
 ## Staged-file delete door
 

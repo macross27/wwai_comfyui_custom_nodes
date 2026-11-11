@@ -19,8 +19,10 @@ the prompt — the newer `is_output_node=True` has no effect on a class like
 these.
 """
 
+import itertools
 import json
 import logging
+import math
 import os
 import weakref
 from collections import OrderedDict
@@ -39,9 +41,13 @@ from .wwai_markers_core import (
     copy_file_verbatim,
     extension_of,
     is_staged_name,
+    RIPPLE_GRID_FPS,
     RIPPLE_RESIZE_METHODS,
+    RIPPLE_VIDEO_UNUSABLE,
     parse_keyframes,
     parse_ripple_manifest,
+    ripple_grid_frame,
+    ripple_grid_slots,
     plan_tracking,
     require_marker_name,
     require_single,
@@ -731,24 +737,153 @@ class WWAIExposeImageOrVideo(FileMarkerMixin):
         return (images, {"kind": "video", "fps": frame_rate})
 
 
-def check_ripple_clip(path, length):
-    """Refuse a clip whose played packets are not `length` frames exactly 1/24 s
-    apart, each with a pts (the frames the Ripple job's markers count)."""
+RIPPLE_WINDOW_MISMATCH = "WWAI_RIPPLE_WINDOW_MISMATCH"
+
+
+def _ripple_unusable(detail):
+    return MarkerContractError(f"{RIPPLE_VIDEO_UNUSABLE}: {detail}")
+
+
+def _ripple_mismatch(detail):
+    return MarkerContractError(f"{RIPPLE_WINDOW_MISMATCH}: {detail}")
+
+
+def _ripple_video_stream(container):
+    if not container.streams.video:
+        raise _ripple_unusable("the movie has no video stream")
+    return container.streams.video[0]
+
+
+def _played_video_stamps(path):
+    """The time base, the played packets' pts (demuxed, nothing decoded) and where the
+    last of them stops (its pts + duration). Packets flagged discard are not played,
+    as WWAI's ffprobe reading counts them."""
+    with av.open(path) as container:
+        stream = _ripple_video_stream(container)
+        stamps, last = [], None
+        for packet in container.demux(stream):
+            if not packet.size or packet.is_discard:
+                continue  # the demuxer's closing empty packet, or one the player drops
+            if packet.pts is None:
+                raise _ripple_unusable("a frame of the movie has no time stamp")
+            stamps.append(packet.pts)
+            if last is None or packet.pts > last[0]:
+                last = (packet.pts, packet.duration)
+        if last is None:
+            raise _ripple_unusable("the movie has no played video frame")
+        if not last[1] or last[1] < 0:
+            raise _ripple_unusable("the movie's last frame has no duration")
+        return stream.time_base, stamps, last[0] + last[1]
+
+
+def _first_decoded_frame(path):
+    with av.open(path) as container:
+        frame = next(container.decode(_ripple_video_stream(container)), None)
+    if frame is None or frame.pts is None:
+        raise _ripple_unusable("the movie decodes no frame with a time stamp")
+    return frame
+
+
+def _decode_window(path, window, played, width, height):
+    """The window's pictures as uint8 [len(window), height, width, 3], decoding from the
+    keyframe before its first frame and stopping after its last; nothing else is kept."""
+    wanted, low, high = set(window), min(window), max(window)
+    pictures = {}
+    with av.open(path) as container:
+        stream = _ripple_video_stream(container)
+        stream.thread_type = "AUTO"
+        container.seek(low, stream=stream, backward=True)
+        for frame in container.decode(stream):
+            if frame.pts is None:
+                raise _ripple_unusable("a decoded frame has no time stamp")
+            if frame.pts > high:
+                break
+            if frame.pts < low:
+                continue
+            if frame.pts not in played:
+                raise _ripple_mismatch(f"the decoder returned a frame at pts {frame.pts} that the movie's packets do not list")
+            if frame.pts in wanted:
+                pictures[frame.pts] = frame.to_ndarray(width=width, height=height, format="rgb24", interpolation="LANCZOS")
+                if len(pictures) == len(wanted):
+                    break
+    missing = sorted(wanted - set(pictures))
+    if missing:
+        raise _ripple_unusable(f"{len(missing)} window frames did not decode (first at pts {missing[0]})")
+    return np.stack([pictures[pts] for pts in window])
+
+
+def _ripple_audio(path, start, length):
+    """The first sound track from *start* seconds for *length* grid frames, as AUDIO, or
+    None when the movie has no sound. Where the track has no sound the window is silent."""
+    with av.open(path) as container:
+        if not container.streams.audio:
+            return None
+        stream = container.streams.audio[0]
+        rate = stream.codec_context.sample_rate
+        first, count = round(start * rate), round(Fraction(length, RIPPLE_GRID_FPS) * rate)
+        waveform = np.zeros((stream.codec_context.layout.nb_channels, count), dtype=np.float32)
+        resampler = av.AudioResampler(format="fltp", layout=stream.codec_context.layout, rate=rate)
+        if start > 1:
+            container.seek(math.floor((start - 1) / stream.time_base), stream=stream, backward=True)
+        for frame in itertools.chain(container.decode(stream), (None,)):
+            for samples in resampler.resample(frame):
+                if samples.pts is None:
+                    raise _ripple_unusable("a piece of the sound track has no time stamp")
+                offset = round(samples.pts * samples.time_base * rate) - first
+                if offset >= count:
+                    return {"waveform": torch.from_numpy(waveform).unsqueeze(0), "sample_rate": rate}
+                low, high = max(0, offset), min(count, offset + samples.samples)
+                if high > low:
+                    waveform[:, low:high] = samples.to_ndarray()[:, low - offset : high - offset]
+    return {"waveform": torch.from_numpy(waveform).unsqueeze(0), "sample_rate": rate}
+
+
+def read_ripple_window(path, job):
+    """The job's window cut from the ORIGINAL movie in memory: (IMAGE, AUDIO or None).
+
+    Re-derives the shot's 24 fps grid from the movie itself (ripple_grid_slots, the
+    rule WWAI ran on its own reading) and refuses WWAI_RIPPLE_WINDOW_MISMATCH when the
+    two readings disagree: another time base, a window past the shot's end, an edit
+    whose pts does not land on its window frame, or a decode size larger than the
+    movie. Nothing is shifted to make them agree."""
+    start, length = job["window_start"], job["length"]
     try:
-        with av.open(path) as container:
-            stream = container.streams.video[0]
-            ticks = sorted(
-                (packet.pts for packet in container.demux(stream) if packet.size), key=lambda pts: (pts is None, pts)
+        time_base, stamps, end_pts = _played_video_stamps(path)
+        if time_base != Fraction(job["time_base"]):
+            raise _ripple_mismatch(f"the movie's time base is {time_base}, the job says {job['time_base']}")
+        first = _first_decoded_frame(path)
+        if first.rotation % 360:
+            raise _ripple_unusable(f"the movie is stored rotated by {first.rotation} degrees")
+        if job["decode_width"] > first.width or job["decode_height"] > first.height:
+            raise _ripple_mismatch(
+                f"the job decodes at {job['decode_width']}x{job['decode_height']}, "
+                f"larger than the movie's {first.width}x{first.height}"
             )
-            time_base = stream.time_base
-    except (av.error.FFmpegError, IndexError) as exc:
-        raise MarkerContractError(f"WWAI_RIPPLE_CLIP_UNUSABLE: the clip cannot be read as a movie ({exc})") from exc
-    if None in ticks:
-        raise MarkerContractError("WWAI_RIPPLE_CLIP_UNUSABLE: a frame of the clip has no time stamp")
-    if len(ticks) != length:
-        raise MarkerContractError(f"WWAI_RIPPLE_CLIP_UNUSABLE: the clip has {len(ticks)} frames, the job says {length}")
-    if any((b - a) * time_base != Fraction(1, 24) for a, b in zip(ticks, ticks[1:])):
-        raise MarkerContractError("WWAI_RIPPLE_CLIP_UNUSABLE: the clip's frames are not exactly 1/24 s apart")
+        p0 = first.pts
+        slots = ripple_grid_slots(stamps, p0, end_pts, time_base)
+        if start + length > len(slots):
+            raise _ripple_mismatch(
+                f"the window ends at grid frame {start + length}, the movie has {len(slots)} grid frames"
+            )
+        ordered = sorted(stamps)
+        next_of = dict(zip(ordered, ordered[1:] + [end_pts]))
+        for marker in job["markers"]:
+            frame, pts = marker["frame"], marker["pts"]
+            if pts not in next_of:
+                raise _ripple_mismatch(f"no frame of the movie has pts {pts} (the edit for window frame {frame})")
+            shown = ripple_grid_frame(pts, next_of[pts], p0, time_base)
+            if shown != start + frame:
+                where = "on no grid frame" if shown is None else f"at grid frame {shown}"
+                raise _ripple_mismatch(
+                    f"the edit for window frame {frame} has pts {pts}, which the movie shows {where}, "
+                    f"not at grid frame {start + frame}"
+                )
+        window = slots[start : start + length]
+        pixels = _decode_window(path, window, next_of, job["decode_width"], job["decode_height"])
+        audio = _ripple_audio(path, (p0 * time_base) + Fraction(start, RIPPLE_GRID_FPS), length)
+    except av.error.FFmpegError as exc:
+        raise _ripple_unusable(f"the movie cannot be read ({exc})") from exc
+    return torch.from_numpy(pixels.astype(np.float32) / 255.0), audio
 
 
 def check_ripple_edit(path):
@@ -763,9 +898,10 @@ def check_ripple_edit(path):
 
 
 class WWAIExposeRippleJob:
-    """One Ripple job (a short clip, the edited pictures and the frame each belongs
-    to) as one text (grammar in wwai_markers_core.parse_ripple_manifest). Checks every
-    file, then feeds WepeNerd's From Frames and Apply as their Ripple Clip would."""
+    """One Ripple job (the original movie, the window on its 24 fps grid, the edited
+    pictures and each one's window frame and pts) as one text (grammar in
+    wwai_markers_core.parse_ripple_manifest). Checks every file, cuts the window in
+    memory (read_ripple_window), then feeds WepeNerd's From Frames exactly that window."""
 
     CATEGORY = INPUT_CATEGORY
     FUNCTION = "expose"
@@ -792,17 +928,14 @@ class WWAIExposeRippleJob:
     def expose(self, value, name, description, required):
         require_marker_name(name, type(self).__name__)
         job = parse_ripple_manifest(value)
-        clip_path = folder_paths.get_annotated_filepath(job["clip"])
-        check_staged_file(clip_path, job["clip"])
         for marker in job["markers"]:
             edit_path = folder_paths.get_annotated_filepath(marker["edited"])
             check_staged_file(edit_path, marker["edited"])
             check_ripple_edit(edit_path)
+        video_path = folder_paths.get_annotated_filepath(job["video"])
+        check_staged_file(video_path, job["video"])
         length = job["length"]
-        check_ripple_clip(clip_path, length)
-        _, images, audio, _ = load_video_file(job["clip"])
-        if len(images) != length:
-            raise MarkerContractError(f"WWAI_RIPPLE_CLIP_UNUSABLE: the clip decodes to {len(images)} frames, the job says {length}")
+        images, audio = read_ripple_window(video_path, job)
         markers = json.dumps(
             [
                 {"id": i + 1, "frame": m["frame"], "edited": m["edited"], "edited_at": m["frame"]}

@@ -19,6 +19,7 @@ compatibility; this is the regression net underneath it.
 
 import hashlib
 import inspect
+import itertools
 import json
 import os
 import pathlib
@@ -1417,8 +1418,58 @@ class RetiredNamesTest(unittest.TestCase):
                         self.assertNotIn(n, text, f"{n} in {f}")
 
 
+def _gray(index):
+    """The grey level source frame *index* of a Ripple test movie is painted (30 levels, then again)."""
+    return 16 + 8 * (index % 30)
+
+
+def _ripple_movie(path, rate=24, frames=30, first=0, audio_from=None):
+    """A real .mov whose frame i is flat grey _gray(i) and whose pts start *first* frames
+    in, plus (with *audio_from*, in seconds) a mono 8 kHz track silent until then and
+    at a quarter of full scale after it."""
+    with av.open(path, "w", format="mov") as container:
+        video = container.add_stream("mpeg4", rate=rate)
+        video.width, video.height, video.pix_fmt = 64, 36, "yuv420p"
+        sound = container.add_stream("pcm_s16le", rate=8000, layout="mono") if audio_from is not None else None
+        for i in range(frames):
+            frame = av.VideoFrame.from_ndarray(np.full((36, 64, 3), _gray(i), np.uint8), format="rgb24")
+            frame.pts = first + i
+            for packet in video.encode(frame):
+                container.mux(packet)
+        for packet in video.encode():
+            container.mux(packet)
+        if sound is not None:
+            total = round(frames / Fraction(rate) * 8000)
+            level = np.where(np.arange(total) >= audio_from * 8000, 8192, 0).astype(np.int16)
+            for begin in range(0, total, 800):
+                chunk = av.AudioFrame.from_ndarray(level[None, begin : begin + 800], format="s16", layout="mono")
+                chunk.sample_rate, chunk.pts = 8000, begin
+                for packet in sound.encode(chunk):
+                    container.mux(packet)
+            for packet in sound.encode():
+                container.mux(packet)
+
+
+def _movie_stamps(path):
+    """(time base, sorted played pts, end pts, first decoded pts) as the movie is stored."""
+    with av.open(path) as container:
+        stream = container.streams.video[0]
+        time_base = stream.time_base
+        packets = [p for p in container.demux(stream) if p.size]
+        last = max(packets, key=lambda p: p.pts)
+    with av.open(path) as container:
+        first = next(container.decode(video=0)).pts
+    return time_base, sorted(p.pts for p in packets), last.pts + last.duration, first
+
+
+def _source_index(picture):
+    return int(np.argmin([abs(float(np.mean(picture)) * 255 - _gray(i)) for i in range(30)]))
+
+
 class RippleJobTest(unittest.TestCase):
-    """WWAIExposeRippleJob checks every file in the job before it hands anything on."""
+    """WWAIExposeRippleJob v2: checks every file, re-derives the 24 fps grid from the
+    ORIGINAL movie, refuses a disagreement with WWAI's reading by name, and cuts only
+    the window, in memory."""
 
     @staticmethod
     def _stage(write, ext):
@@ -1431,16 +1482,22 @@ class RippleJobTest(unittest.TestCase):
         os.replace(scratch, os.path.join(_IN, name))
         return name
 
-    def _job(self, rate=24, frames=5, edit_bytes=None, **changes):
-        clip = self._stage(lambda path: _tiny_movie(path, rate=rate, frames=frames), "mp4")
+    def _movie(self, **movie):
+        video = self._stage(lambda path: _ripple_movie(path, **movie), "mov")
+        return video, _movie_stamps(os.path.join(_IN, video))
+
+    def _job(self, video, stamps, window_start=3, length=22, edits=((2, 5),), edit_bytes=None, **changes):
+        """A v2 job text; *edits* are (window frame, index of the played packet whose pts it carries)."""
+        time_base, pts, _end, _first = stamps
         if edit_bytes is None:
             edit = self._stage(lambda path: Image.new("RGB", (4, 4), (9, 9, 9)).save(path), "png")
         else:
             edit = self._stage(lambda path: pathlib.Path(path).write_bytes(edit_bytes), "png")
         job = {
-            "version": 1, "clip": clip, "length": 5, "megapixels": 0.25, "allow_upscale": False,
-            "resize_method": "lanczos", "output_width": 0, "output_height": 0,
-            "markers": [{"frame": 2, "edited": edit}],
+            "version": 2, "video": video, "time_base": f"{time_base.numerator}/{time_base.denominator}",
+            "window_start": window_start, "length": length, "decode_width": 32, "decode_height": 18,
+            "megapixels": 0.25, "allow_upscale": False, "resize_method": "lanczos", "output_width": 0, "output_height": 0,
+            "markers": [{"frame": frame, "pts": pts[index], "edited": edit} for frame, index in edits],
         }
         job.update(changes)
         return json.dumps(job)
@@ -1448,38 +1505,127 @@ class RippleJobTest(unittest.TestCase):
     def _run(self, text):
         return nodes.WWAIExposeRippleJob().expose(value=text, name="job", description="", required=True)
 
-    def test_a_good_job_feeds_from_frames(self):
-        text = self._job()
+    def test_a_good_job_feeds_from_frames_exactly_its_window(self):
+        video, stamps = self._movie()
+        text = self._job(video, stamps)
         edit = json.loads(text)["markers"][0]["edited"]
-        images, _audio, rate, duration, mp, start, markers, upscale, method, width, height = self._run(text)
-        self.assertEqual(images.shape[0], 5)
-        self.assertEqual((rate, duration, mp, start, upscale, method, width, height), (24.0, 5 / 24, 0.25, 0, False, "lanczos", 0, 0))
+        images, audio, rate, duration, mp, start, markers, upscale, method, width, height = self._run(text)
+        self.assertEqual(images.shape, (22, 18, 32, 3))
+        self.assertEqual([_source_index(picture) for picture in images], list(range(3, 25)))
+        self.assertIsNone(audio)  # no sound track in this movie
+        self.assertEqual((rate, duration, mp, start, upscale, method, width, height), (24.0, 22 / 24, 0.25, 0, False, "lanczos", 0, 0))
         self.assertEqual(json.loads(markers), [{"id": 1, "frame": 2, "edited": edit, "edited_at": 2}])
         self.assertEqual(len(nodes.WWAIExposeRippleJob.RETURN_TYPES), len(nodes.WWAIExposeRippleJob.RETURN_NAMES))
 
-    def test_a_clip_not_at_24_fps_is_refused(self):
-        with self.assertRaisesRegex(MarkerContractError, "1/24 s"):
-            self._run(self._job(rate=30))
+    def test_a_30_fps_movie_with_a_late_start_shows_the_frames_the_rule_names(self):
+        video, stamps = self._movie(rate=30, frames=30, first=3)
+        time_base, pts, end, first = stamps
+        self.assertEqual(first, pts[0])  # mpeg4 has no reordering: the first packet decodes first
+        slots = nodes.ripple_grid_slots(pts, first, end, time_base)
+        # window frame 2 is grid frame 5, which shows the 7th source frame (30 fps skips 1 in 5)
+        images = self._run(self._job(video, stamps, window_start=3, length=5, edits=((2, pts.index(slots[5])),)))[0]
+        self.assertEqual([_source_index(picture) for picture in images], [pts.index(p) for p in slots[3:8]])
+        self.assertEqual([pts.index(p) for p in slots[3:8]], [4, 5, 6, 8, 9])  # source frame 7 is skipped
 
-    def test_a_clip_with_other_than_length_frames_is_refused(self):
-        with self.assertRaisesRegex(MarkerContractError, "has 3 frames"):
-            self._run(self._job(frames=3))
+    def test_the_rule_matches_ffmpegs_own_24_fps_conversion(self):
+        """The open fact of plan 2418: this machine's FFmpeg resamples to 24 fps exactly as
+        the rule says (the fps filter, round=near, from the first decoded frame)."""
+        for rate, first in ((Fraction(24000, 1001), 0), (25, 1), (30, 3), (12, 0)):
+            with self.subTest(rate=rate, first=first):
+                path = os.path.join(_IN, "ripple-oracle.mov")
+                _ripple_movie(path, rate=rate, frames=30, first=first)
+                time_base, pts, end, p0 = _movie_stamps(path)
+                slots = nodes.ripple_grid_slots(pts, p0, end, time_base)
+                shown = []
+                with av.open(path) as container:
+                    graph = None
+                    for frame in itertools.chain(container.decode(video=0), (None,)):
+                        if graph is None:
+                            graph = av.filter.Graph()
+                            graph.link_nodes(
+                                graph.add_buffer(width=frame.width, height=frame.height, format=frame.format, time_base=frame.time_base),
+                                graph.add("setpts", f"PTS-{p0}"),
+                                graph.add("fps", "fps=24:start_time=0:round=near"),
+                                graph.add("buffersink"),
+                            )
+                            graph.configure()
+                        graph.push(frame)
+                        while True:
+                            try:
+                                out = graph.pull()
+                            except (av.error.BlockingIOError, av.error.EOFError):
+                                break
+                            shown.append(_source_index(out.to_ndarray(format="rgb24") / 255.0))
+                rule = [pts.index(p) for p in slots]
+                self.assertEqual(shown[: len(rule)], rule)
+                self.assertLessEqual(len(shown) - len(rule), 1, (shown, rule))  # EOF may pad one frame
 
-    def test_an_edit_that_does_not_load_is_refused(self):
-        with self.assertRaisesRegex(MarkerContractError, "WWAI_RIPPLE_EDIT_UNUSABLE"):
-            self._run(self._job(edit_bytes=b"\x89PNG\r\n\x1a\n" + b"x" * 8))
+    def test_the_sound_is_cut_to_the_window(self):
+        video, stamps = self._movie(frames=60, audio_from=1)
+        late = self._run(self._job(video, stamps, window_start=24, edits=((0, 24),)))[1]
+        early = self._run(self._job(video, stamps, window_start=0, edits=((0, 0),)))[1]
+        for audio in (late, early):
+            self.assertEqual((audio["sample_rate"], audio["waveform"].shape), (8000, (1, 1, round(22 / 24 * 8000))))
+        self.assertTrue(np.allclose(np.asarray(late["waveform"]), 0.25, atol=1e-3))
+        self.assertTrue(np.allclose(np.asarray(early["waveform"]), 0.0))
 
-    def test_a_damaged_staged_copy_raises_the_restage_text(self):
-        text = self._job()
-        clip = json.loads(text)["clip"]
-        with open(os.path.join(_IN, clip), "ab") as handle:
-            handle.write(b"junk")
-        with self.assertRaisesRegex(MarkerContractError, "WWAI_STAGED_FILE_UNUSABLE"):
+    def _refused(self, text, pattern):
+        with self.assertRaisesRegex(MarkerContractError, pattern):
             self._run(text)
 
-    def test_a_bad_job_text_is_refused_before_any_file_is_read(self):
-        with self.assertRaisesRegex(MarkerContractError, "WWAI_RIPPLE_JOB_INVALID"):
-            self._run("{}")
+    def test_an_edit_whose_pts_lands_on_another_frame_is_refused(self):
+        video, stamps = self._movie()
+        self._refused(self._job(video, stamps, edits=((2, 6),)), r"^WWAI_RIPPLE_WINDOW_MISMATCH: .*pts .* at grid frame 6, not at grid frame 5")
+
+    def test_an_edit_on_a_frame_the_grid_skips_is_refused(self):
+        video, stamps = self._movie(rate=30, frames=30)
+        _tb, pts, end, first = stamps
+        slots = nodes.ripple_grid_slots(pts, first, end, _tb)
+        skipped = next(i for i, p in enumerate(pts) if p not in slots)
+        self._refused(self._job(video, stamps, window_start=0, length=5, edits=((2, skipped),)), r"^WWAI_RIPPLE_WINDOW_MISMATCH: .*on no grid frame")
+
+    def test_an_edit_whose_pts_is_no_frame_of_the_movie_is_refused(self):
+        video, stamps = self._movie()
+        text = json.loads(self._job(video, stamps))
+        text["markers"][0]["pts"] += 1
+        self._refused(json.dumps(text), r"^WWAI_RIPPLE_WINDOW_MISMATCH: no frame of the movie has pts")
+
+    def test_another_time_base_is_refused(self):
+        video, stamps = self._movie()
+        self._refused(self._job(video, stamps, time_base="1/90000"), r"^WWAI_RIPPLE_WINDOW_MISMATCH: the movie's time base")
+
+    def test_a_window_past_the_shot_is_refused(self):
+        video, stamps = self._movie(frames=30)
+        self._refused(self._job(video, stamps, window_start=9, edits=((0, 9),)), r"^WWAI_RIPPLE_WINDOW_MISMATCH: the window ends at grid frame 31, the movie has 30")
+
+    def test_a_decode_size_larger_than_the_movie_is_refused(self):
+        video, stamps = self._movie()
+        self._refused(self._job(video, stamps, decode_width=65), r"^WWAI_RIPPLE_WINDOW_MISMATCH: the job decodes at 65x18")
+
+    def test_a_file_that_is_no_movie_is_refused(self):
+        video = self._stage(lambda path: pathlib.Path(path).write_bytes(b"not a movie at all"), "mov")
+        stamps = (Fraction(1, 12288), list(range(0, 30 * 512, 512)), 0, 0)
+        self._refused(self._job(video, stamps), r"^WWAI_RIPPLE_VIDEO_UNUSABLE: the movie cannot be read")
+
+    def test_an_edit_that_does_not_load_is_refused(self):
+        video, stamps = self._movie()
+        self._refused(self._job(video, stamps, edit_bytes=b"\x89PNG\r\n\x1a\n" + b"x" * 8), "WWAI_RIPPLE_EDIT_UNUSABLE")
+
+    def test_a_damaged_staged_copy_raises_the_restage_text(self):
+        video, stamps = self._movie()
+        text = self._job(video, stamps)
+        with open(os.path.join(_IN, video), "ab") as handle:
+            handle.write(b"junk")
+        self._refused(text, "WWAI_STAGED_FILE_UNUSABLE")
+
+    def test_a_version_1_job_is_refused_before_any_file_is_read(self):
+        v1 = {
+            "version": 1, "clip": f"wwai/wwai-{'a' * 64}.mp4", "length": 5, "megapixels": 0.25, "allow_upscale": False,
+            "resize_method": "lanczos", "output_width": 0, "output_height": 0,
+            "markers": [{"frame": 2, "edited": f"wwai/wwai-{'b' * 64}.png"}],
+        }
+        self._refused(json.dumps(v1), "^WWAI_RIPPLE_JOB_INVALID")
+        self._refused("{}", "^WWAI_RIPPLE_JOB_INVALID")
 
 
 if __name__ == "__main__":
