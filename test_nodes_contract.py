@@ -1598,6 +1598,27 @@ class RippleJobTest(unittest.TestCase):
         video, stamps = self._movie(frames=30)
         self._refused(self._job(video, stamps, window_start=9, edits=((0, 9),)), r"^WWAI_RIPPLE_WINDOW_MISMATCH: the window ends at grid frame 31, the movie has 30")
 
+    def test_the_window_it_cuts_is_the_size_wwai_charges(self):
+        """The decoded half of WWAI's window_bytes (ripple_cases.json "window_bytes", the same
+        rows its test_ripple_job.py checks): the picture tensor plus the sound window, in bytes."""
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "ripple_cases.json"), encoding="utf-8") as handle:
+            rows = json.load(handle)["window_bytes"]
+        for row in rows:
+            if not row["gpu_check"]:
+                continue
+            with self.subTest(row["name"]):
+                self.assertIn(row["audio_rate"], (0, 8000))  # _ripple_movie writes 8 kHz mono
+                video, stamps = self._movie(audio_from=0.1 if row["audio_rate"] else None)
+                text = self._job(
+                    video, stamps, length=row["length"], decode_width=row["decode_width"],
+                    decode_height=row["decode_height"], megapixels=row["megapixels"],
+                )
+                images, audio = self._run(text)[:2]
+                got = images.nbytes
+                if audio is not None:
+                    got += audio["waveform"].nbytes
+                self.assertEqual(got, row["window_decoded_bytes"])
+
     def test_a_decode_size_larger_than_the_movie_is_refused(self):
         video, stamps = self._movie()
         self._refused(self._job(video, stamps, decode_width=65), r"^WWAI_RIPPLE_WINDOW_MISMATCH: the job decodes at 65x18")
