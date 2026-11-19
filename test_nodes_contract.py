@@ -1001,6 +1001,26 @@ class PathNodesTest(unittest.TestCase):
             nodes.WWAISaveToPath().expose(self.batch(1), self.pattern, 1001, "16-bit")
         self.assertEqual(sorted(os.listdir(f"{self.root}/show")), before)
 
+    def test_a_missing_folder_is_named_before_anything_is_written(self):
+        gone = f"{self.root}/show/gone"
+        for node, path in (
+            (nodes.WWAILoadFromPath, f"{gone}/x.%04d.png"),
+            (nodes.WWAISaveToPath, f"{gone}/x.%04d.png"),
+            (nodes.WWAISaveToPath, f"{gone}/one.png"),
+        ):
+            with self.subTest(node=node.__name__, path=path):
+                with self.assertRaises(MarkerContractError) as caught:
+                    if node is nodes.WWAILoadFromPath:
+                        node().expose(path)
+                    else:
+                        node().expose(self.batch(1), path, 1, "8-bit")
+                self.assertEqual(
+                    str(caught.exception),
+                    f"WWAI_FOLDER_MISSING: {node.__name__}: folder {gone!r} does not exist",
+                )
+        self.assertEqual(self.calls, [])
+        self.assertEqual(os.listdir(f"{self.root}/show"), [])
+
     def test_load_refuses_frames_of_different_size(self):
         Image.new("RGB", (6, 4)).save(f"{self.root}/show/m.0001.png")
         Image.new("RGB", (8, 4)).save(f"{self.root}/show/m.0002.png")

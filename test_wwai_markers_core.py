@@ -863,6 +863,21 @@ class WriteInPlaceTest(unittest.TestCase):
                 write_all_in_place(self.items(4))
         self.assertEqual(sorted(os.listdir(self.dir)), ["s.0.png", "s.1.png"])
 
+    def test_an_interrupt_during_the_renames_is_not_reported_as_a_partial_write(self):
+        real = os.replace
+        calls = []
+
+        def interrupted(src, dst):
+            calls.append(dst)
+            if len(calls) == 2:
+                raise KeyboardInterrupt
+            real(src, dst)
+
+        with mock.patch.object(os, "replace", side_effect=interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                write_all_in_place(self.items(3))
+        self.assertEqual(os.listdir(self.dir), ["s.0.png"])
+
     def test_a_missing_output_folder_fails_loud_and_is_not_created(self):
         missing = os.path.join(self.dir, "nope", "out.png")
         with self.assertRaises(FileNotFoundError):

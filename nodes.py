@@ -57,6 +57,7 @@ from .wwai_markers_core import (
     split_items,
     unannotated,
     refuse_stale_frames,
+    require_folder,
     require_contiguous,
     write_all_in_place,
     write_in_place,
@@ -1484,6 +1485,7 @@ class WWAISaveToPath(AlwaysRerunMixin):
         pattern = frame_pattern(path)
         if pattern is None:
             image = require_single(list(images), class_name, "image")
+            require_folder(os.path.dirname(path), class_name)
             write_in_place(path, writer(image))
             return (path,)
 

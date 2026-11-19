@@ -146,8 +146,16 @@ def frame_pattern(path):
     return directory, base[: token.start()], int(token.group(1)), base[token.end() :]
 
 
-def _listed_frames(path):
+def require_folder(directory, class_name):
+    """Refuse the run when ``directory`` does not exist; it is never created."""
+    if not os.path.isdir(directory):
+        raise MarkerContractError(f"WWAI_FOLDER_MISSING: {class_name}: folder {directory!r} does not exist")
+    return directory
+
+
+def _listed_frames(path, class_name):
     directory, prefix, width, suffix = frame_pattern(path)
+    require_folder(directory, class_name)
     name = re.compile(re.escape(prefix) + f"([0-9]{{{width}}})" + re.escape(suffix))
     frames = []
     for entry in os.listdir(directory):
@@ -165,7 +173,7 @@ def sequence_frames(path, class_name):
     """
     if frame_pattern(path) is None:
         _refuse_path(class_name, "source path", path, "has no frame-number token such as %04d")
-    frames = _listed_frames(path)
+    frames = _listed_frames(path, class_name)
     if not frames:
         raise MarkerContractError(f"WWAI_SEQUENCE_EMPTY: {class_name}: no frames match {path!r}")
     return frames
@@ -188,7 +196,7 @@ def refuse_stale_frames(path, first, last, class_name):
     Overwriting inside the range is allowed; a returned pattern must never match
     a frame this run did not write. Nothing is deleted.
     """
-    stale = [n for n, _ in _listed_frames(path) if not first <= n <= last]
+    stale = [n for n, _ in _listed_frames(path, class_name) if not first <= n <= last]
     if stale:
         raise MarkerContractError(
             f"WWAI_STALE_FRAMES: {class_name}: {len(stale)} frames outside {first}-{last} already match "
@@ -212,7 +220,8 @@ def write_all_in_place(items):
     """``items`` is ``[(final_path, write)]``. Write every temp first, then rename in order.
 
     A failed temp write removes all temps and replaces nothing. A failed rename
-    removes the remaining temps and says how many files were already replaced.
+    removes the remaining temps and says how many files were already replaced; an
+    interrupt (anything not an ``OSError``) removes them and is raised unchanged.
     """
     temps = []
     try:
@@ -229,7 +238,7 @@ def write_all_in_place(items):
             os.replace(temp_path, final_path)
         except BaseException as exc:
             _remove_temps(temps[done:])
-            if done == 0:
+            if done == 0 or not isinstance(exc, OSError):
                 raise
             raise MarkerContractError(
                 f"WWAI_PARTIAL_WRITE: {done} of {len(items)} frames were replaced before {final_path!r} "
