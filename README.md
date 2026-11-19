@@ -35,9 +35,8 @@ back on. On each machine:
    until `GET http://<machine>:8188/queue` shows nothing running or pending.
    Both, because a restart wipes ComfyUI's history and WWAI reads a missing
    entry as still running.
-3. Copy this folder to the machine's `ComfyUI/custom_nodes/wwai_comfyui_custom_nodes`
-   (on 10.0.20.100: `/Virtual/comfyui/ComfyUI/custom_nodes/wwai_comfyui_custom_nodes`,
-   as `pixell`).
+3. Copy this folder to the machine's `ComfyUI/custom_nodes/wwai_comfyui_custom_nodes`,
+   as the account that runs ComfyUI.
 4. `kill -TERM` the ComfyUI process, wait for `comfyui.service` to bring it back,
    and check that `GET http://<machine>:8188/object_info` lists the new classes.
 5. Switch the machine back on in Admin > GPU machines.
