@@ -21,8 +21,12 @@ from wwai_markers_core import (
     check_staged_file,
     copy_file_verbatim,
     extension_of,
+    frame_pattern,
     require_marker_name,
     require_single,
+    require_storage_path,
+    sequence_frames,
+    write_in_place,
     check_keyframes,
     parse_keyframes,
     parse_ripple_manifest,
@@ -694,6 +698,113 @@ class RippleGridTest(unittest.TestCase):
             with self.subTest(pts=pts, p0=p0, end=end):
                 with self.assertRaisesRegex(MarkerContractError, "^WWAI_RIPPLE_VIDEO_UNUSABLE: "):
                     ripple_grid_slots(pts, p0, end, tb)
+
+
+class RequireStoragePathTest(unittest.TestCase):
+    def test_a_path_under_the_root_comes_back_unchanged(self):
+        path = "/storenext/show/sh010/plate.%04d.png"
+        self.assertIs(require_storage_path(path, "N", "source path"), path)
+
+    def test_refusals(self):
+        for path in (
+            "plate.png", "./storenext/a.png", "", "   ", None, 5, "/storenext", "/storenextX/a.png",
+            "/opt/x.png", "/storenext//a.png", "/storenext/a/", "/storenext/", "/storenext/./a.png",
+            "/storenext/a/../b.png", "/storenext/a\\b.png", "/storenext/a\x00b.png",
+        ):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(MarkerContractError, r"^WWAI_PATH_REFUSED: Cls: output path ") as caught:
+                    require_storage_path(path, "Cls", "output path")
+                self.assertIn(repr(path), str(caught.exception))
+
+    def test_the_root_is_read_at_call_time(self):
+        with mock.patch.object(wwai_markers_core, "STORAGE_ROOT", "/tmp/x/"):
+            self.assertEqual(require_storage_path("/tmp/x/a.png", "N", "source path"), "/tmp/x/a.png")
+            with self.assertRaises(MarkerContractError):
+                require_storage_path("/storenext/a.png", "N", "source path")
+
+
+class FramePatternTest(unittest.TestCase):
+    def test_none_one_two_and_percent_in_the_folder(self):
+        self.assertIsNone(frame_pattern("/storenext/a/plate.png"))
+        self.assertEqual(frame_pattern("/storenext/a/plate.%04d.png"), ("/storenext/a", "plate.", 4, ".png"))
+        self.assertEqual(frame_pattern("/storenext/a/%01d"), ("/storenext/a", "", 1, ""))
+        for path in ("/storenext/a/p.%04d.%04d.png", "/storenext/100%/p.%04d.png", "/storenext/a/p.%4d.png", "/storenext/a/p%.png", "/storenext/a/p.%04d%.png"):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(MarkerContractError, "^WWAI_PATH_REFUSED: "):
+                    frame_pattern(path)
+
+
+class SequenceFramesTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def touch(self, *names):
+        for name in names:
+            open(os.path.join(self.dir, name), "wb").close()
+
+    def test_only_exact_width_matches_come_back_sorted(self):
+        self.touch("p.0010.png", "p.0002.png", "p.002.png", "p.00003.png", "p.0004.jpg", "q.0005.png", "p.000a.png")
+        frames = sequence_frames(f"{self.dir}/p.%04d.png", "Cls")
+        self.assertEqual(frames, [(2, f"{self.dir}/p.0002.png"), (10, f"{self.dir}/p.0010.png")])
+
+    def test_no_match_is_refused(self):
+        self.touch("other.png")
+        with self.assertRaisesRegex(MarkerContractError, "^WWAI_SEQUENCE_EMPTY: Cls"):
+            sequence_frames(f"{self.dir}/p.%04d.png", "Cls")
+
+
+class WriteInPlaceTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.final = os.path.join(self.dir, "out.png")
+
+    @staticmethod
+    def put(data):
+        def write(temp_path):
+            with open(temp_path, "wb") as handle:
+                handle.write(data)
+
+        return write
+
+    def test_writes_and_returns_the_final_path_leaving_no_temp(self):
+        self.assertEqual(write_in_place(self.final, self.put(b"one")), self.final)
+        with open(self.final, "rb") as handle:
+            self.assertEqual(handle.read(), b"one")
+        self.assertEqual(os.listdir(self.dir), ["out.png"])
+
+    def test_overwrite_is_allowed(self):
+        write_in_place(self.final, self.put(b"one"))
+        write_in_place(self.final, self.put(b"two"))
+        with open(self.final, "rb") as handle:
+            self.assertEqual(handle.read(), b"two")
+
+    def test_a_failing_write_raises_leaves_no_temp_and_keeps_the_old_file(self):
+        write_in_place(self.final, self.put(b"old"))
+
+        def broken(temp_path):
+            with open(temp_path, "wb") as handle:
+                handle.write(b"half")
+            raise OSError("disk full")
+
+        with self.assertRaisesRegex(OSError, "disk full"):
+            write_in_place(self.final, broken)
+        self.assertEqual(os.listdir(self.dir), ["out.png"])
+        with open(self.final, "rb") as handle:
+            self.assertEqual(handle.read(), b"old")
+
+    def test_no_path_comes_back_when_the_rename_fails(self):
+        with mock.patch.object(os, "replace", side_effect=OSError("rename refused")):
+            with self.assertRaisesRegex(OSError, "rename refused"):
+                write_in_place(self.final, self.put(b"data"))
+        self.assertEqual(os.listdir(self.dir), [])
+
+    def test_a_missing_output_folder_fails_loud_and_is_not_created(self):
+        missing = os.path.join(self.dir, "nope", "out.png")
+        with self.assertRaises(FileNotFoundError):
+            write_in_place(missing, self.put(b"data"))
+        self.assertFalse(os.path.exists(os.path.dirname(missing)))
 
 
 if __name__ == "__main__":

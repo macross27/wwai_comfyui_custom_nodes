@@ -7,6 +7,7 @@ refusing a marker that would produce an unnamed or ambiguous parameter — are
 therefore unit-testable on a bare Python, with no ComfyUI installed.
 """
 
+import contextlib
 import hashlib
 import hmac
 import json
@@ -15,6 +16,7 @@ import os
 import re
 import shutil
 import stat
+import uuid
 from collections import namedtuple
 from fractions import Fraction
 
@@ -87,6 +89,102 @@ def copy_file_verbatim(src_path, dest_path):
         os.makedirs(parent, exist_ok=True)
     shutil.copy2(src_path, dest_path)
     return dest_path
+
+
+# Where the studio's shared storage is mounted on every GPU machine. An
+# architectural invariant, not an admin setting: this process runs on the GPU
+# machine and cannot read WWAI's settings.
+STORAGE_ROOT = "/storenext/"
+
+_FRAME_TOKEN = re.compile(r"%0([1-9])d")
+
+
+def _refuse_path(class_name, what, path, reason):
+    raise MarkerContractError(f"WWAI_PATH_REFUSED: {class_name}: {what} {path!r} {reason}")
+
+
+def require_storage_path(path, class_name, what):
+    """Return ``path`` unchanged, or refuse the run.
+
+    Nothing is normalised, resolved or stripped: a path that needs tidying is
+    a path someone typed wrong, and tidying it would write somewhere the
+    artist did not name. ``what`` is "source path" or "output path".
+    """
+    if not isinstance(path, str) or not path.strip():
+        _refuse_path(class_name, what, path, "is empty or not text")
+    if "\\" in path or "\x00" in path:
+        _refuse_path(class_name, what, path, "contains a backslash or NUL character")
+    if not path.startswith("/"):
+        _refuse_path(class_name, what, path, "is not an absolute path")
+    if not path.startswith(STORAGE_ROOT):
+        _refuse_path(class_name, what, path, f"is outside {STORAGE_ROOT}")
+    segments = path.split("/")[1:]
+    if any(segment == "" for segment in segments):
+        _refuse_path(class_name, what, path, "has an empty folder name (a doubled or trailing '/')")
+    if any(segment in (".", "..") for segment in segments):
+        _refuse_path(class_name, what, path, "contains a '.' or '..' folder name")
+    return path
+
+
+def frame_pattern(path):
+    """``(directory, prefix, width, suffix)`` for a ``name.%04d.ext`` path, else None.
+
+    The token ``%0Nd`` (N 1-9) may appear once, in the file name only.
+    """
+    directory, _, base = path.rpartition("/")
+    if "%" in directory:
+        _refuse_path("frame_pattern", "path", path, "has a '%' in the folder part")
+    tokens = list(_FRAME_TOKEN.finditer(base))
+    if len(tokens) > 1:
+        _refuse_path("frame_pattern", "path", path, "has more than one frame-number token in the file name")
+    if base.count("%") != len(tokens):
+        # plate.%4d.png would otherwise be read or written as a file literally named that.
+        _refuse_path("frame_pattern", "path", path, "has a '%' that is not a frame-number token such as %04d")
+    if not tokens:
+        return None
+    token = tokens[0]
+    return directory, base[: token.start()], int(token.group(1)), base[token.end() :]
+
+
+def sequence_frames(path, class_name):
+    """Sorted ``[(frame_number, full_path)]`` of the files a pattern path names.
+
+    Only files with exactly the pattern's digit count match, so ``plate.10000.png``
+    is not frame 10000 of a ``%04d`` sequence.
+    """
+    pattern = frame_pattern(path)
+    if pattern is None:
+        _refuse_path(class_name, "source path", path, "has no frame-number token such as %04d")
+    directory, prefix, width, suffix = pattern
+    name = re.compile(re.escape(prefix) + f"([0-9]{{{width}}})" + re.escape(suffix))
+    frames = []
+    for entry in os.listdir(directory):
+        match = name.fullmatch(entry)
+        if match:
+            frames.append((int(match.group(1)), f"{directory}/{entry}"))
+    if not frames:
+        raise MarkerContractError(f"WWAI_SEQUENCE_EMPTY: {class_name}: no frames match {path!r}")
+    return sorted(frames)
+
+
+def write_in_place(final_path, write):
+    """Write ``final_path`` through a temp file in its own folder, then rename.
+
+    The reader never sees a half-written file, and ``final_path`` is returned
+    only once the rename has succeeded. Any failure removes the temp file and
+    raises. The folder is never created (a missing one fails loud), and an
+    existing file is overwritten: the artist owns the output path.
+    """
+    directory, base = os.path.split(final_path)
+    temp_path = os.path.join(directory, f".{base}.wwai-tmp-{uuid.uuid4().hex}")
+    try:
+        write(temp_path)
+        os.replace(temp_path, final_path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temp_path)
+        raise
+    return final_path
 
 
 # Name grammars shared with WWAI's backend (a sibling-checkout test compares

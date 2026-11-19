@@ -30,6 +30,7 @@ import types
 import unittest
 from enum import Enum
 from fractions import Fraction
+from unittest import mock
 
 import av
 import numpy as np
@@ -453,13 +454,14 @@ ALL_NODES = {
     "WWAIExposeOutputVideo", "WWAIExposeOutputMesh",
     "WWAIRefuseBlankMask",
     "WWAIExposeKeyframes", "WWAIExposeImageOrVideo", "WWAIExposeOutputImageOrVideo", "WWAIRotoTrack",
+    "WWAIExposeOutputText", "WWAILoadFromPath", "WWAISaveToPath",
 }
 # Utility nodes WWAI does not treat as markers (no WWAIExpose prefix): they
 # carry no name/description/required widgets.
-NON_MARKER_NODES = {"WWAIRefuseBlankMask", "WWAIRotoTrack"}
+NON_MARKER_NODES = {"WWAIRefuseBlankMask", "WWAIRotoTrack", "WWAILoadFromPath", "WWAISaveToPath"}
 OUTPUT_NODES = {
     "WWAIExposeOutputImage", "WWAIExposeOutputAudio",
-    "WWAIExposeOutputVideo", "WWAIExposeOutputMesh", "WWAIExposeOutputImageOrVideo",
+    "WWAIExposeOutputVideo", "WWAIExposeOutputMesh", "WWAIExposeOutputImageOrVideo", "WWAIExposeOutputText",
 }
 
 
@@ -487,7 +489,10 @@ class RegistrationTest(unittest.TestCase):
             self.assertIs(widget[1]["default"], True, name)
 
     def test_non_markers_do_not_use_the_marker_prefix(self):
-        display = {"WWAIRefuseBlankMask": "WWAI Refuse Blank Mask", "WWAIRotoTrack": "WWAI Roto Track"}
+        display = {
+            "WWAIRefuseBlankMask": "WWAI Refuse Blank Mask", "WWAIRotoTrack": "WWAI Roto Track",
+            "WWAILoadFromPath": "WWAI Load From Path", "WWAISaveToPath": "WWAI Save To Path",
+        }
         self.assertEqual(set(display), NON_MARKER_NODES)
         for name in NON_MARKER_NODES:
             self.assertFalse(name.startswith("WWAIExpose"), name)
@@ -567,6 +572,25 @@ class SocketTypeTest(unittest.TestCase):
 
     def test_mesh_input_emits_what_load3d_emits(self):
         self.assertEqual(nodes.WWAIExposeMesh.RETURN_TYPES, ("FILE_3D",))
+
+    def test_path_nodes_sockets(self):
+        load, save, text = nodes.WWAILoadFromPath, nodes.WWAISaveToPath, nodes.WWAIExposeOutputText
+        self.assertEqual(load.RETURN_TYPES, ("IMAGE", "INT", "FLOAT"))
+        self.assertEqual(load.RETURN_NAMES, ("images", "first_frame", "fps"))
+        self.assertEqual(set(load.INPUT_TYPES()["required"]), {"path"})
+        required = save.INPUT_TYPES()["required"]
+        self.assertEqual(set(required), {"images", "path", "first_frame", "bit_depth"})
+        self.assertEqual(required["images"][0], "IMAGE")
+        self.assertEqual(required["first_frame"][1], {"default": 1, "min": 0, "max": 9999999})
+        self.assertEqual(required["bit_depth"][0], ["16-bit", "8-bit"])
+        self.assertEqual(required["bit_depth"][1]["default"], "16-bit")
+        self.assertEqual((save.RETURN_TYPES, save.RETURN_NAMES), (("STRING",), ("path",)))
+        self.assertFalse(getattr(save, "OUTPUT_NODE", False))
+        self.assertEqual(text.RETURN_TYPES, ())
+        self.assertEqual(text.INPUT_TYPES()["required"]["value"], ("STRING", {"forceInput": True}))
+        for cls in (load, save):
+            self.assertEqual(cls.CATEGORY, "WWAI/Utility")
+        self.assertEqual(text.CATEGORY, "WWAI/Expose Output")
 
     def test_mesh_output_accepts_every_3d_type_comfyui_has(self):
         # ComfyUI matches sockets by exact string and has fourteen 3D types.
@@ -851,11 +875,162 @@ class OutputMarkerTest(unittest.TestCase):
             ("WWAIExposeOutputAudio", {"value": _audio(), "format": "flac"}),
             ("WWAIExposeOutputVideo", {"video": _VideoFromFile(os.path.join(_IN, "clip.mp4"))}),
             ("WWAIExposeOutputMesh", {"value": _File3D(os.path.join(_IN, "splat.ply"))}),
+            ("WWAIExposeOutputText", {"value": "/storenext/a.png"}),
         ]
         for name, kwargs in cases:
             with self.assertRaises(MarkerContractError, msg=name):
                 nodes.NODE_CLASS_MAPPINGS[name]().expose(name="", description="", **kwargs)
 
+
+
+def _png_encoder_stub(calls):
+    """Stands in for core's _encode_image: a real PNG of the float image."""
+    import io
+
+    def encode(image, format, bit_depth, input_color_space):
+        calls.append((format, bit_depth, input_color_space))
+        array = np.clip(255.0 * np.asarray(image), 0, 255).astype(np.uint8)
+        buffer = io.BytesIO()
+        Image.fromarray(array).save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    return encode
+
+
+class PathNodesTest(unittest.TestCase):
+    """Plan 2458: read and write studio storage by path. The storage root is
+    pointed at a temp folder so no test ever touches the real /storenext/."""
+
+    def setUp(self):
+        import importlib
+
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        os.makedirs(os.path.join(self.root, "show"))
+        core = importlib.import_module(nodes.__package__ + ".wwai_markers_core")
+        self.calls = []
+        for patcher in (
+            mock.patch.object(core, "STORAGE_ROOT", self.root + "/"),
+            mock.patch.object(nodes, "_encode_image", _png_encoder_stub(self.calls)),
+            mock.patch.object(nodes, "IMAGE_ENCODER_IMPORT_ERROR", None),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.pattern = f"{self.root}/show/matte.%04d.png"
+
+    def batch(self, count=2):
+        arr = np.zeros((count, 4, 6, 3), dtype=np.float32)
+        for i in range(count):
+            arr[i] = (i + 1) / 10.0
+        return _Tensor(arr)
+
+    def test_sequence_round_trip(self):
+        (path,) = nodes.WWAISaveToPath().expose(self.batch(), self.pattern, 1001, "16-bit")
+        self.assertEqual(path, self.pattern)
+        self.assertEqual(self.calls, [("png", "16-bit", "sRGB")] * 2)
+        self.assertEqual(sorted(os.listdir(f"{self.root}/show")), ["matte.1001.png", "matte.1002.png"])
+        for name in ("matte.1001.png", "matte.1002.png"):
+            with Image.open(f"{self.root}/show/{name}") as img:
+                self.assertEqual(img.size, (6, 4))
+        images, first_frame, fps = nodes.WWAILoadFromPath().expose(self.pattern)
+        self.assertEqual((images.shape, first_frame, fps), ((2, 4, 6, 3), 1001, 0.0))
+        np.testing.assert_allclose(np.asarray(images)[1], 0.2, atol=1 / 255)
+
+    def test_a_single_file_is_written_and_overwritten(self):
+        target = f"{self.root}/show/one.png"
+        nodes.WWAISaveToPath().expose(self.batch(1), target, 1, "8-bit")
+        self.assertEqual(self.calls[-1][1], "8-bit")
+        self.assertEqual(nodes.WWAISaveToPath().expose(self.batch(1), target, 1, "8-bit"), (target,))
+        self.assertEqual(os.listdir(f"{self.root}/show"), ["one.png"])
+        with self.assertRaises(MarkerContractError):
+            nodes.WWAISaveToPath().expose(self.batch(2), target, 1, "8-bit")
+
+    def test_refused_output_paths_write_nothing(self):
+        for path in (
+            f"{self.root}/show/../matte.%04d.png", "/opt/matte.%04d.png", f"{self.root}/show/matte.%04d.exr",
+            f"{self.root}/show/matte.%04d.%04d.png", f"{self.root}/show//matte.png",
+        ):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(MarkerContractError, "^WWAI_PATH_REFUSED: "):
+                    nodes.WWAISaveToPath().expose(self.batch(), path, 1, "16-bit")
+        self.assertEqual(os.listdir(f"{self.root}/show"), [])
+        self.assertEqual(os.listdir(self.root), ["show"])
+
+    def test_a_frame_number_too_wide_for_the_pattern_is_refused_before_any_write(self):
+        with self.assertRaisesRegex(MarkerContractError, "^WWAI_PATH_REFUSED: "):
+            nodes.WWAISaveToPath().expose(self.batch(), self.pattern, 9999, "16-bit")
+        self.assertEqual(os.listdir(f"{self.root}/show"), [])
+
+    def test_no_path_is_returned_when_a_frame_fails_to_write(self):
+        with mock.patch.object(nodes, "_encode_image", side_effect=ValueError("bad pixels")):
+            with self.assertRaisesRegex(ValueError, "bad pixels"):
+                nodes.WWAISaveToPath().expose(self.batch(), self.pattern, 1, "16-bit")
+        self.assertEqual(os.listdir(f"{self.root}/show"), [])
+
+    def test_missing_encoder_is_a_named_runtime_error(self):
+        with mock.patch.object(nodes, "IMAGE_ENCODER_IMPORT_ERROR", ImportError("no nodes_images")):
+            with self.assertRaisesRegex(RuntimeError, "no nodes_images"):
+                nodes.WWAISaveToPath().expose(self.batch(), self.pattern, 1, "16-bit")
+
+    def test_save_always_reruns(self):
+        import math
+
+        self.assertTrue(math.isnan(nodes.WWAISaveToPath.IS_CHANGED(images=None, path="x", first_frame=1, bit_depth="8-bit")))
+
+    def test_load_refusals(self):
+        load = nodes.WWAILoadFromPath()
+        for path, token in (
+            ("/opt/x.%04d.png", "WWAI_PATH_REFUSED"),
+            (f"{self.root}/show/x.%04d.jpg", "WWAI_PATH_REFUSED"),
+            (f"{self.root}/show/x.%04d.png", "WWAI_SEQUENCE_EMPTY"),
+        ):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(MarkerContractError, "^" + token):
+                    load.expose(path)
+
+    def test_load_refuses_frames_of_different_size(self):
+        Image.new("RGB", (6, 4)).save(f"{self.root}/show/m.0001.png")
+        Image.new("RGB", (8, 4)).save(f"{self.root}/show/m.0002.png")
+        with self.assertRaisesRegex(MarkerContractError, "^WWAI_SEQUENCE_MISMATCH: "):
+            nodes.WWAILoadFromPath().expose(f"{self.root}/show/m.%04d.png")
+
+    def test_load_reads_a_movie_with_its_frame_rate(self):
+        _tiny_movie(f"{self.root}/show/clip.mp4", rate=24, frames=3)
+        images, first_frame, fps = nodes.WWAILoadFromPath().expose(f"{self.root}/show/clip.mp4")
+        self.assertEqual((images.shape, first_frame, fps), ((3, 16, 16, 3), 1, 24.0))
+        self.assertIsInstance(fps, float)
+
+    def test_load_refuses_an_unreadable_movie(self):
+        with open(f"{self.root}/show/bad.mp4", "wb") as handle:
+            handle.write(b"not a movie")
+        with self.assertRaisesRegex(MarkerContractError, "^WWAI_VIDEO_UNREADABLE: "):
+            nodes.WWAILoadFromPath().expose(f"{self.root}/show/bad.mp4")
+        with self.assertRaisesRegex(MarkerContractError, "^WWAI_VIDEO_UNREADABLE: "):
+            nodes.WWAILoadFromPath().expose(f"{self.root}/show/missing.mp4")
+
+    def test_load_is_cached_by_file_state_and_runs_when_the_path_is_unusable(self):
+        import math
+
+        changed = nodes.WWAILoadFromPath.IS_CHANGED
+        nodes.WWAISaveToPath().expose(self.batch(), self.pattern, 1001, "16-bit")
+        first = changed(self.pattern)
+        self.assertEqual(first, changed(self.pattern))
+        self.assertEqual(first[0], self.pattern)
+        os.utime(f"{self.root}/show/matte.1002.png", (1, 1))
+        self.assertNotEqual(first, changed(self.pattern))
+        for path in ("/opt/x.png", f"{self.root}/show/none.%04d.png", f"{self.root}/show/none.mp4"):
+            self.assertTrue(math.isnan(changed(path)), path)
+
+    def test_output_text_returns_the_one_shape_wwai_reads(self):
+        text = nodes.WWAIExposeOutputText()
+        self.assertEqual(
+            text.expose(self.pattern, "written", ""), {"ui": {"wwai_result": [{"text": self.pattern}]}}
+        )
+        for bad in ("", None, 3):
+            with self.assertRaises(MarkerContractError):
+                text.expose(bad, "written", "")
+        with self.assertRaises(MarkerContractError):
+            text.expose(self.pattern, " ", "")
 
 
 class RefuseBlankMaskTest(unittest.TestCase):
@@ -1334,7 +1509,7 @@ class OutputMarkerCachingTest(unittest.TestCase):
         import math
 
         outputs = [cls for cls in nodes.NODE_CLASS_MAPPINGS.values() if getattr(cls, "OUTPUT_NODE", False)]
-        self.assertEqual(len(outputs), 5)
+        self.assertEqual(len(outputs), 6)
         for cls in outputs:
             first = cls.IS_CHANGED(value=None, name="n", description="")
             self.assertTrue(math.isnan(first), cls.__name__)

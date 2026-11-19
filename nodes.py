@@ -40,6 +40,7 @@ from .wwai_markers_core import (
     check_staged_file,
     copy_file_verbatim,
     extension_of,
+    frame_pattern,
     is_staged_name,
     RIPPLE_GRID_FPS,
     RIPPLE_RESIZE_METHODS,
@@ -51,8 +52,11 @@ from .wwai_markers_core import (
     plan_tracking,
     require_marker_name,
     require_single,
+    require_storage_path,
+    sequence_frames,
     split_items,
     unannotated,
+    write_in_place,
 )
 
 logger = logging.getLogger(__name__)
@@ -1317,6 +1321,25 @@ class WWAIExposeOutputMesh(AlwaysRerunMixin):
         return wwai_result(entry)
 
 
+class WWAIExposeOutputText(AlwaysRerunMixin):
+    CATEGORY = OUTPUT_CATEGORY
+    FUNCTION = "expose"
+    RETURN_TYPES = ()
+    OUTPUT_NODE = True
+    DESCRIPTION = "Marks a finished text (for example the path a Save To Path node wrote) as WWAI's result."
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"value": ("STRING", {"forceInput": True}), **metadata_widgets()}}
+
+    def expose(self, value, name, description):
+        class_name = type(self).__name__
+        require_marker_name(name, class_name)
+        if not isinstance(value, str) or not value:
+            raise MarkerContractError(f"{class_name}: the text to report is empty or not text.")
+        return wwai_result({"text": value})
+
+
 class WWAIRefuseBlankMask:
     """Not a marker (no WWAIExpose prefix): fails a mask run that found nothing."""
 
@@ -1336,6 +1359,145 @@ class WWAIRefuseBlankMask:
         if images.numel() == 0 or images.max() <= 0:
             raise MarkerContractError("WWAI_NOTHING_FOUND: Nothing was found, so no mask was made.")
         return (images,)
+
+
+def _load_png_sequence(path, class_name):
+    """(frames, first frame number) of a ``name.%04d.png`` sequence, as RGB float32 in [0, 1]."""
+    if not path.lower().endswith(".png"):
+        raise MarkerContractError(f"WWAI_PATH_REFUSED: {class_name}: source path {path!r} is not a .png sequence")
+    frames = sequence_frames(path, class_name)
+    arrays = []
+    for number, frame_path in frames:
+        with Image.open(frame_path) as img:
+            arrays.append(np.array(img.convert("RGB")).astype(np.float32) / 255.0)
+        if arrays[-1].shape != arrays[0].shape:
+            raise MarkerContractError(
+                f"WWAI_SEQUENCE_MISMATCH: {class_name}: frame {number} is {arrays[-1].shape[1]}x{arrays[-1].shape[0]}, "
+                f"the first frame is {arrays[0].shape[1]}x{arrays[0].shape[0]}"
+            )
+    return torch.from_numpy(np.stack(arrays)), frames[0][0]
+
+
+def _load_movie(path, class_name):
+    """(frames, frame rate) of a movie file, as RGB float32 in [0, 1]."""
+    try:
+        with av.open(path) as container:
+            streams = container.streams.video
+            rate = streams[0].average_rate if streams else None
+            if not rate:
+                raise MarkerContractError(
+                    f"WWAI_VIDEO_NO_FRAME_RATE: {class_name}: {path} has no video stream with a frame rate"
+                )
+            arrays = [f.to_ndarray(format="rgb24").astype(np.float32) / 255.0 for f in container.decode(video=0)]
+    except av.error.FFmpegError as exc:
+        raise MarkerContractError(f"WWAI_VIDEO_UNREADABLE: {class_name}: {path} cannot be opened as a movie ({exc})") from exc
+    if not arrays:
+        raise MarkerContractError(f"WWAI_VIDEO_UNREADABLE: {class_name}: {path} has no video frames")
+    return torch.from_numpy(np.stack(arrays)), float(rate)
+
+
+class WWAILoadFromPath:
+    """Not a marker: reads a plate straight from studio storage, by path."""
+
+    CATEGORY = UTILITY_CATEGORY
+    FUNCTION = "expose"
+    RETURN_TYPES = (IMAGE_TYPE, "INT", "FLOAT")
+    RETURN_NAMES = ("images", "first_frame", "fps")
+    DESCRIPTION = (
+        "Reads a movie file or a PNG sequence (name.%04d.png) from /storenext/ and returns "
+        "its frames, the first frame number and the frame rate (0 for a PNG sequence)."
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"path": ("STRING", {"default": "", "multiline": False})}}
+
+    @classmethod
+    def IS_CHANGED(cls, path):
+        # Re-read only when a source file changed. A refused or missing path
+        # reports NaN so the run executes and fails loud in expose().
+        try:
+            require_storage_path(path, cls.__name__, "source path")
+            if frame_pattern(path) is None:
+                files = [path]
+            else:
+                files = [p for _, p in sequence_frames(path, cls.__name__)]
+            return (path, *((os.path.getmtime(f), os.path.getsize(f)) for f in files))
+        except (MarkerContractError, OSError):
+            return float("nan")
+
+    def expose(self, path):
+        class_name = type(self).__name__
+        require_storage_path(path, class_name, "source path")
+        if frame_pattern(path) is not None:
+            images, first_frame = _load_png_sequence(path, class_name)
+            return (images, first_frame, 0.0)
+        images, fps = _load_movie(path, class_name)
+        return (images, 1, fps)
+
+
+class WWAISaveToPath(AlwaysRerunMixin):
+    """Not a marker: writes finished frames straight to studio storage, by path."""
+
+    CATEGORY = UTILITY_CATEGORY
+    FUNCTION = "expose"
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("path",)
+    DESCRIPTION = (
+        "Writes PNG files under /storenext/: one file, or a sequence when the path has a "
+        "%04d token. Each file is written to a temp name then renamed, and an existing "
+        "file is overwritten. Returns the path only after every file is in place."
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": (IMAGE_TYPE,),
+                "path": ("STRING", {"default": "", "multiline": False}),
+                "first_frame": ("INT", {"default": 1, "min": 0, "max": 9999999}),
+                "bit_depth": (["16-bit", "8-bit"], {"default": "16-bit"}),
+            }
+        }
+
+    def expose(self, images, path, first_frame, bit_depth):
+        class_name = type(self).__name__
+        require_storage_path(path, class_name, "output path")
+        if not path.rpartition("/")[2].lower().endswith(".png"):
+            raise MarkerContractError(f"WWAI_PATH_REFUSED: {class_name}: output path {path!r} must end in .png")
+        if IMAGE_ENCODER_IMPORT_ERROR is not None:
+            raise RuntimeError(
+                f"{class_name}: this ComfyUI has no Save Image (Advanced) encoders "
+                f"(comfy_extras.nodes_images): {IMAGE_ENCODER_IMPORT_ERROR}"
+            )
+
+        def writer(image):
+            def write(temp_path):
+                with open(temp_path, "wb") as handle:
+                    handle.write(_encode_image(image, "png", bit_depth, "sRGB"))
+
+            return write
+
+        pattern = frame_pattern(path)
+        if pattern is None:
+            image = require_single(list(images), class_name, "image")
+            write_in_place(path, writer(image))
+            return (path,)
+
+        directory, prefix, width, suffix = pattern
+        frames = list(images)
+        if not frames:
+            raise MarkerContractError(f"{class_name}: expected at least 1 image, got 0.")
+        last = first_frame + len(frames) - 1
+        if len(str(last)) > width:
+            raise MarkerContractError(
+                f"WWAI_PATH_REFUSED: {class_name}: output path {path!r} cannot hold frame {last} "
+                f"in {width} digits, and a reader would not find it"
+            )
+        for offset, image in enumerate(frames):
+            number = str(first_frame + offset).zfill(width)
+            write_in_place(f"{directory}/{prefix}{number}{suffix}", writer(image))
+        return (path,)
 
 
 # One-frame layer results, so a click that changes one object does not re-run
@@ -1493,7 +1655,10 @@ NODE_CLASS_MAPPINGS = {
     "WWAIExposeCombo": WWAIExposeCombo,
     "WWAIExposeImage": WWAIExposeImage,
     "WWAIExposeOutputImage": WWAIExposeOutputImage,
+    "WWAIExposeOutputText": WWAIExposeOutputText,
     "WWAIRefuseBlankMask": WWAIRefuseBlankMask,
+    "WWAILoadFromPath": WWAILoadFromPath,
+    "WWAISaveToPath": WWAISaveToPath,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1505,7 +1670,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WWAIExposeCombo": "WWAI Expose Combo",
     "WWAIExposeImage": "WWAI Expose Image",
     "WWAIExposeOutputImage": "WWAI Expose Output Image",
+    "WWAIExposeOutputText": "WWAI Expose Output Text",
     "WWAIRefuseBlankMask": "WWAI Refuse Blank Mask",
+    "WWAILoadFromPath": "WWAI Load From Path",
+    "WWAISaveToPath": "WWAI Save To Path",
 }
 
 # The video and 3D markers need payload classes an older ComfyUI does not

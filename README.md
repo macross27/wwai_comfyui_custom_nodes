@@ -80,6 +80,7 @@ one file.
 | WWAI Expose Output Video | `video`, **or** `images` + `audio` + `fps` | `.mp4` |
 | WWAI Expose Output Image Or Video | `images` + `media_info` (required, from WWAI Expose Image Or Video) | `.png` for a picture, `.mp4` at the input's frame rate for a movie |
 | WWAI Expose Output Mesh | `MESH` or any of ComfyUI's 13 `FILE_3D_*` types | `.glb` from geometry; the source file copied verbatim otherwise |
+| WWAI Expose Output Text | `value` (`STRING`, wired in) | nothing: reports the text itself as `{"text": value}`, e.g. the path WWAI Save To Path returned — see Paths on studio storage |
 
 The image output's `format`, `bit_depth` and `input_color_space` widgets match
 core's **Save Image (Advanced)** and use its encoders. `input_color_space` says
@@ -256,6 +257,26 @@ Utility — category `WWAI/Utility`. Not a marker (no `WWAIExpose` prefix, no
 |---|---|
 | WWAI Refuse Blank Mask | Takes `images`, returns them unchanged. If every pixel of the whole batch is zero, or the batch is empty, it fails with `WWAI_NOTHING_FOUND: Nothing was found, so no mask was made.` instead of letting a mask run save an all-black file. |
 | WWAI Roto Track | Takes `frames`, `model` and `clip` (the SAM3 checkpoint), `keyframes`, `prompt` and eight tuning numbers; returns `mask` (`IMAGE`, white = object) for the output range. Needs ComfyUI's SAM3 nodes. |
+| WWAI Load From Path | Takes a `path` under `/storenext/`: a movie file or a PNG sequence (`name.%04d.png`). Returns `images`, `first_frame` (lowest frame number; 1 for a movie) and `fps` (0 for a PNG sequence). |
+| WWAI Save To Path | Takes `images`, an output `path` ending `.png` (one file, or `name.%04d.png` for a sequence), `first_frame` and `bit_depth` (16-bit default). Writes the files in place and returns the `path` only after every file is written. |
+
+### Paths on studio storage
+
+WWAI Load From Path and WWAI Save To Path work on the studio's shared storage,
+root `/storenext/` (a constant: this process cannot read WWAI's settings). A path
+is refused with `WWAI_PATH_REFUSED:` when it is empty, relative, outside the root,
+has an empty, `.` or `..` folder name (so a doubled or trailing `/`), or holds a
+backslash or NUL. Nothing is normalised or tidied: the path is used exactly as
+typed. A `%04d` token (`%01d`..`%09d`, once, in the file name only) names a
+sequence; a reader matches only files with exactly that many digits.
+
+Each output file is written to a temp name in the same folder
+(`.name.wwai-tmp-<id>`) and renamed, so a reader never sees half a file, and the
+temp file is removed on any failure. An existing file is overwritten (the artist
+owns the output path). A missing output folder is an error, never created.
+Only the written path travels back to WWAI (wire it into WWAI Expose Output
+Text). What the GPU machine may read or write is limited only by the rights of the
+account ComfyUI runs as.
 
 ### WWAI Expose Ripple Job
 
