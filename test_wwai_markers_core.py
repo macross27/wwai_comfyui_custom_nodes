@@ -12,6 +12,7 @@ import sys
 import tempfile
 import types
 import unittest
+from fractions import Fraction
 from unittest import mock
 
 import wwai_markers_core
@@ -20,10 +21,24 @@ from wwai_markers_core import (
     check_staged_file,
     copy_file_verbatim,
     extension_of,
+    frame_pattern,
     require_marker_name,
     require_single,
-    split_clicks,
+    require_storage_path,
+    refuse_stale_frames,
+    require_contiguous,
+    sequence_frames,
+    write_all_in_place,
+    write_in_place,
+    check_keyframes,
+    parse_keyframes,
+    parse_ripple_manifest,
+    ripple_grid_count,
+    ripple_grid_frame,
+    ripple_grid_slots,
+    plan_tracking,
     staged_file_delete,
+    tracked_frames,
     unannotated,
 )
 
@@ -447,10 +462,23 @@ class StagedFileDeleteTest(unittest.TestCase):
                 (200, {"wwai_staged_file": "deleted"}),
             )
         self.assertFalse(os.path.exists(file_path))
+    def test_a_clip_named_only_inside_a_queued_manifest_is_in_use(self):
+        status, body = self._call(f"wwai-{'a' * 64}.mp4", queued={_ripple()})
+        self.assertEqual((status, body["wwai_staged_file"]), (409, "in_use"))
+        status, body = self._call(f"wwai-{'b' * 64}.png", queued={_ripple()})
+        self.assertEqual((status, body["wwai_staged_file"]), (409, "in_use"))
+
+    def test_a_manifest_naming_another_file_does_not_block(self):
+        self._put(f"wwai-{'d' * 64}.mp4")
+        self.assertEqual(self._call(f"wwai-{'d' * 64}.mp4", queued={_ripple()})[0], 200)
+
+    def test_a_queued_text_that_is_no_manifest_is_ignored(self):
+        self._put(f"wwai-{'a' * 64}.mp4")
+        self.assertEqual(self._call(f"wwai-{'a' * 64}.mp4", queued={"{not json"})[0], 200)
 
 
-class SplitClicksTest(unittest.TestCase):
-    """Every row of click_cases.json; WWAI runs the same rows through its own coercer."""
+class KeyframesTest(unittest.TestCase):
+    """The keyframes grammar and the step count, from click_cases.json's keyframe keys."""
 
     with open(
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "click_cases.json"),
@@ -458,28 +486,403 @@ class SplitClicksTest(unittest.TestCase):
     ) as _cases_file:
         CASES = json.load(_cases_file)
 
+    @staticmethod
+    def _check(row):
+        return check_keyframes(parse_keyframes(row["state"]), row["frame_count"], row["prompt_set"])
+
     def test_valid_rows(self):
-        for row in self.CASES["valid"]:
+        for row in self.CASES["keyframes_valid"]:
             with self.subTest(row["name"]):
-                got = split_clicks(row["canonical"])
-                names = ("include_points", "exclude_points", "include_boxes", "exclude_boxes", "frame")
-                self.assertEqual(dict(zip(names, got)), row["outputs"])
+                self._check(row)
 
-    def test_valid_rows_accept_their_uncanonical_form(self):
-        for row in self.CASES["valid"]:
-            with self.subTest(row["name"]):
-                self.assertEqual(split_clicks(json.dumps(row["state"])), split_clicks(row["canonical"]))
-
-    def test_invalid_rows(self):
-        for row in self.CASES["invalid"]:
+    def test_invalid_rows_are_refused_by_name(self):
+        reasons = set()
+        for row in self.CASES["keyframes_invalid"]:
             with self.subTest(row["name"]):
                 with self.assertRaises(MarkerContractError) as caught:
-                    split_clicks(row["state"])
-                self.assertIn(row["refusal"], str(caught.exception))
+                    self._check(row)
+                self.assertTrue(
+                    str(caught.exception).startswith(f"{row['refusal']}: {row['reason']}:"),
+                    str(caught.exception),
+                )
+                reasons.add(row["reason"])
+        self.assertEqual(
+            reasons,
+            {
+                "malformed", "in_after_out", "repeated_keyframe", "frame_outside_clip",
+                "range_outside_clip", "picture_frame_not_zero", "prompt_keyframe_without_prompt",
+                "nothing_to_track", "click_object_without_clicks", "empty_clip", "exclude_box_unsupported",
+            },
+        )
 
-    def test_non_text_is_refused(self):
-        with self.assertRaises(MarkerContractError):
-            split_clicks({"source": "a" * 64, "frame": 0, "items": []})
+    def test_the_rows_the_plan_names_are_present(self):
+        tracked = {row["name"]: row["tracked"] for row in self.CASES["tracked_frames"]}
+        self.assertEqual(tracked["staggered keys over 40-120"], 204)
+        self.assertEqual(tracked["prompt with no object-0 key over 50-60"], 61)
+        self.assertEqual(tracked["picture with a prompt and one click"], 2)
+        invalid = {row["name"]: row["reason"] for row in self.CASES["keyframes_invalid"]}
+        self.assertEqual(invalid["range In 60 after Out 50"], "in_after_out")
+        self.assertEqual(invalid["two keyframes at frame 10 for object 1"], "repeated_keyframe")
+
+    def test_tracked_frames_rows(self):
+        for row in self.CASES["tracked_frames"]:
+            with self.subTest(row["name"]):
+                self.assertEqual(tracked_frames(row["state"], row["frame_count"], row["prompt_set"]), row["tracked"])
+
+    def test_nearest_keyframe_per_object_tie_goes_earlier(self):
+        rows = {row["name"]: row for row in self.CASES["tracked_frames"]}
+        row = rows["staggered keys over 40-120"]
+        (first, last), layers = plan_tracking(row["state"], row["frame_count"], row["prompt_set"])
+        self.assertEqual((first, last), (40, 120))
+        spans = {obj: [(s.key, s.first, s.last) for s in layer] for obj, layer in layers}
+        # A at 0 and 100: frame 50 is a tie, so it goes to 0; B at 50 takes the whole range.
+        self.assertEqual(spans, {1: [(0, 40, 50), (100, 51, 120)], 2: [(50, 40, 120)]})
+
+    def test_a_prompt_with_no_object_0_key_is_keyed_at_frame_0(self):
+        state = json.dumps({"source": "a" * 64, "keyframes": [], "range": {"in": 50, "out": 60}})
+        _, layers = plan_tracking(state, 150, True)
+        (obj, layer), = layers
+        self.assertEqual(obj, 0)
+        (span,) = layer
+        self.assertEqual((span.key, span.items, span.first, span.last), (0, None, 50, 60))
+        self.assertEqual(span.calls, ((0, 60),))
+
+    def test_steps_per_span(self):
+        from wwai_markers_core import track_calls
+
+        self.assertEqual(track_calls(5, 5, 5), ((5, 5),))
+        self.assertEqual(track_calls(5, 5, 9), ((5, 9),))
+        self.assertEqual(track_calls(5, 2, 5), ((5, 2),))
+        self.assertEqual(track_calls(5, 2, 9), ((5, 9), (5, 2)))
+        self.assertEqual(track_calls(0, 40, 50), ((0, 50),))
+        self.assertEqual(track_calls(100, 51, 120), ((100, 120), (100, 51)))
+
+    def test_parse_alone_checks_shape_order_and_repeats(self):
+        state = json.dumps({"source": "a" * 64, "keyframes": [{"frame": 3, "object": 1, "items": []}]})
+        keyframes, frame_range = parse_keyframes(state)
+        self.assertEqual(frame_range, None)
+        self.assertEqual([(k.frame, k.object) for k in keyframes], [(3, 1)])
+
+
+def _ripple(**changes):
+    """A valid v2 ripple manifest as text, with *changes* applied."""
+    manifest = {
+        "version": 2,
+        "video": f"wwai/wwai-{'a' * 64}.mp4",
+        "time_base": "1/12288",
+        "window_start": 3,
+        "length": 22,
+        "decode_width": 64,
+        "decode_height": 36,
+        "megapixels": 0.25,
+        "allow_upscale": False,
+        "resize_method": "lanczos",
+        "output_width": 0,
+        "output_height": 0,
+        "markers": [
+            {"frame": 0, "pts": 1536, "edited": f"wwai/wwai-{'b' * 64}.png"},
+            {"frame": 21, "pts": 12288, "edited": f"wwai/wwai-{'c' * 64}.png"},
+        ],
+    }
+    manifest.update(changes)
+    return json.dumps(manifest)
+
+
+class RippleManifestTest(unittest.TestCase):
+    def _refused(self, text):
+        with self.assertRaises(MarkerContractError) as caught:
+            parse_ripple_manifest(text)
+        self.assertTrue(str(caught.exception).startswith("WWAI_RIPPLE_JOB_INVALID: "))
+
+    def test_a_valid_manifest_parses(self):
+        manifest = parse_ripple_manifest(_ripple())
+        self.assertEqual((manifest["length"], manifest["window_start"], manifest["time_base"]), (22, 3, "1/12288"))
+        self.assertEqual([(m["frame"], m["pts"]) for m in manifest["markers"]], [(0, 1536), (21, 12288)])
+
+    def test_a_version_1_job_is_refused(self):
+        v1 = {
+            "version": 1, "clip": f"wwai/wwai-{'a' * 64}.mp4", "length": 22, "megapixels": 0.25,
+            "allow_upscale": False, "resize_method": "lanczos", "output_width": 0, "output_height": 0,
+            "markers": [{"frame": 0, "edited": f"wwai/wwai-{'b' * 64}.png"}],
+        }
+        self._refused(json.dumps(v1))
+        self._refused(_ripple(version=1))
+
+    def test_text_over_16_kib_is_refused_before_parsing(self):
+        with mock.patch.object(wwai_markers_core.json, "loads") as loads:
+            self._refused(" " * (16 * 1024 + 1))
+        loads.assert_not_called()
+
+    def test_a_bad_name_is_refused(self):
+        self._refused(_ripple(video="wwai/wwai-short.mp4"))
+        self._refused(_ripple(markers=[{"frame": 0, "pts": 0, "edited": "../../etc/passwd"}]))
+
+    def test_a_frame_outside_the_length_is_refused(self):
+        self._refused(_ripple(markers=[{"frame": 22, "pts": 0, "edited": f"wwai/wwai-{'b' * 64}.png"}]))
+
+    def test_the_33rd_edit_is_refused_and_the_32nd_is_not(self):
+        def edits(count):
+            return [{"frame": i, "pts": i * 512, "edited": f"wwai/wwai-{'b' * 64}.png"} for i in range(count)]
+
+        parse_ripple_manifest(_ripple(length=39, markers=edits(32)))
+        self._refused(_ripple(length=39, markers=edits(33)))
+
+    def test_anything_else_outside_the_schema_is_refused(self):
+        edit = {"frame": 0, "pts": 0, "edited": f"wwai/wwai-{'b' * 64}.png"}
+        for bad in (
+            "not json",
+            "[]",
+            _ripple(version=3),
+            _ripple(version=True),
+            _ripple(time_base="1/0"),
+            _ripple(time_base="0.5"),
+            _ripple(time_base=24),
+            _ripple(window_start=-1),
+            _ripple(window_start=10_000_001),
+            _ripple(length=23),  # not 17k + 5
+            _ripple(length=3593),
+            _ripple(decode_width=0),
+            _ripple(decode_height=16385),
+            _ripple(megapixels=0),
+            _ripple(megapixels=True),
+            _ripple(allow_upscale="no"),
+            _ripple(resize_method="spline"),
+            _ripple(output_width=512),  # width without height
+            _ripple(output_width=16385, output_height=512),
+            _ripple(markers=[]),
+            _ripple(markers=[edit, edit]),  # repeated frame
+            _ripple(markers=[edit, {**edit, "frame": 1}]),  # repeated pts
+            _ripple(markers=[{**edit, "frame": 1.5}]),
+            _ripple(markers=[{**edit, "pts": 1.5}]),
+            _ripple(markers=[{**edit, "pts": True}]),
+            _ripple(markers=[{"frame": 0, "edited": edit["edited"]}]),  # no pts
+            _ripple(markers=[{**edit, "x": 1}]),
+        ):
+            with self.subTest(bad[:80]):
+                self._refused(bad)
+        extra = json.loads(_ripple())
+        extra["surprise"] = 1
+        self._refused(json.dumps(extra))
+
+
+class RippleGridTest(unittest.TestCase):
+    """The frame rule, from ripple_cases.json (byte-identical to WWAI's comfyui_ripple_cases.json)."""
+
+    with open(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "ripple_cases.json"),
+        encoding="utf-8",
+    ) as _cases_file:
+        CASES = json.load(_cases_file)
+
+    def test_each_frame_lands_on_its_grid_frame(self):
+        for row in self.CASES["grid"]:
+            with self.subTest(row["name"]):
+                tb = Fraction(row["time_base"])
+                ends = row["pts"][1:] + [row["end_pts"]]
+                got = [ripple_grid_frame(p, n, row["p0"], tb) for p, n in zip(row["pts"], ends)]
+                self.assertEqual(got, row["frames"])
+                self.assertEqual(ripple_grid_count(row["end_pts"], row["p0"], tb), row["count"])
+
+    def test_the_slots_agree_with_the_frames_and_the_count(self):
+        for row in self.CASES["grid"]:
+            with self.subTest(row["name"]):
+                # Packets come in decode order: the rule sorts them itself.
+                slots = ripple_grid_slots(list(reversed(row["pts"])), row["p0"], row["end_pts"], Fraction(row["time_base"]))
+                self.assertEqual(len(slots), row["count"])
+                for pts, frame in zip(row["pts"], row["frames"]):
+                    if frame is None:
+                        self.assertNotIn(pts, slots)
+                    else:
+                        self.assertEqual(slots.index(pts), frame)
+
+    def test_stamps_the_rule_cannot_place_are_refused(self):
+        tb = Fraction(1, 12288)
+        for pts, p0, end in (([0, 512, 512], 0, 1024), ([0, 512], 0, 512), ([], 0, 512), ([0, 512], 256, 1024)):
+            with self.subTest(pts=pts, p0=p0, end=end):
+                with self.assertRaisesRegex(MarkerContractError, "^WWAI_RIPPLE_VIDEO_UNUSABLE: "):
+                    ripple_grid_slots(pts, p0, end, tb)
+
+
+class RequireStoragePathTest(unittest.TestCase):
+    def test_a_path_under_the_root_comes_back_unchanged(self):
+        path = "/storenext/show/sh010/plate.%04d.png"
+        self.assertIs(require_storage_path(path, "N", "source path"), path)
+
+    def test_refusals(self):
+        for path in (
+            "plate.png", "./storenext/a.png", "", "   ", None, 5, "/storenext", "/storenextX/a.png",
+            "/opt/x.png", "/storenext//a.png", "/storenext/a/", "/storenext/", "/storenext/./a.png",
+            "/storenext/a/../b.png", "/storenext/a\\b.png", "/storenext/a\x00b.png",
+        ):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(MarkerContractError, r"^WWAI_PATH_REFUSED: Cls: output path ") as caught:
+                    require_storage_path(path, "Cls", "output path")
+                self.assertIn(repr(path), str(caught.exception))
+
+    def test_the_root_is_read_at_call_time(self):
+        with mock.patch.object(wwai_markers_core, "STORAGE_ROOT", "/tmp/x/"):
+            self.assertEqual(require_storage_path("/tmp/x/a.png", "N", "source path"), "/tmp/x/a.png")
+            with self.assertRaises(MarkerContractError):
+                require_storage_path("/storenext/a.png", "N", "source path")
+
+
+class FramePatternTest(unittest.TestCase):
+    def test_none_one_two_and_percent_in_the_folder(self):
+        self.assertIsNone(frame_pattern("/storenext/a/plate.png"))
+        self.assertEqual(frame_pattern("/storenext/a/plate.%04d.png"), ("/storenext/a", "plate.", 4, ".png"))
+        self.assertEqual(frame_pattern("/storenext/a/%01d"), ("/storenext/a", "", 1, ""))
+        for path in ("/storenext/a/p.%04d.%04d.png", "/storenext/100%/p.%04d.png", "/storenext/a/p.%4d.png", "/storenext/a/p%.png", "/storenext/a/p.%04d%.png"):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(MarkerContractError, "^WWAI_PATH_REFUSED: "):
+                    frame_pattern(path)
+
+
+class SequenceFramesTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def touch(self, *names):
+        for name in names:
+            open(os.path.join(self.dir, name), "wb").close()
+
+    def test_only_exact_width_matches_come_back_sorted(self):
+        self.touch("p.0010.png", "p.0002.png", "p.002.png", "p.00003.png", "p.0004.jpg", "q.0005.png", "p.000a.png")
+        frames = sequence_frames(f"{self.dir}/p.%04d.png", "Cls")
+        self.assertEqual(frames, [(2, f"{self.dir}/p.0002.png"), (10, f"{self.dir}/p.0010.png")])
+
+    def test_a_gap_is_refused_naming_the_first_missing_frame(self):
+        self.touch("p.1001.png", "p.1002.png", "p.1004.png")
+        frames = sequence_frames(f"{self.dir}/p.%04d.png", "Cls")
+        with self.assertRaisesRegex(MarkerContractError, "^WWAI_SEQUENCE_GAP: Cls: frame 1003 is missing"):
+            require_contiguous(frames, f"{self.dir}/p.%04d.png", "Cls")
+
+    def test_a_contiguous_run_and_a_single_frame_pass(self):
+        self.touch("p.0005.png", "p.0006.png", "p.0007.png")
+        frames = sequence_frames(f"{self.dir}/p.%04d.png", "Cls")
+        self.assertEqual(require_contiguous(frames, "x", "Cls"), frames)
+        self.assertEqual(require_contiguous(frames[:1], "x", "Cls"), frames[:1])
+
+    def test_stale_frames_outside_the_written_range_are_refused_and_kept(self):
+        self.touch(*(f"p.{n:04d}.png" for n in range(1001, 1011)))
+        with self.assertRaisesRegex(MarkerContractError, r"^WWAI_STALE_FRAMES: Cls: 4 frames outside 1001-1006 .*first is 1007"):
+            refuse_stale_frames(f"{self.dir}/p.%04d.png", 1001, 1006, "Cls")
+        self.assertEqual(len(os.listdir(self.dir)), 10)
+
+    def test_frames_inside_the_range_or_none_at_all_pass(self):
+        self.touch("p.1001.png", "p.1002.png")
+        refuse_stale_frames(f"{self.dir}/p.%04d.png", 1001, 1006, "Cls")
+        refuse_stale_frames(f"{self.dir}/q.%04d.png", 1, 3, "Cls")
+
+    def test_no_match_is_refused(self):
+        self.touch("other.png")
+        with self.assertRaisesRegex(MarkerContractError, "^WWAI_SEQUENCE_EMPTY: Cls"):
+            sequence_frames(f"{self.dir}/p.%04d.png", "Cls")
+
+
+class WriteInPlaceTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        self.final = os.path.join(self.dir, "out.png")
+
+    @staticmethod
+    def put(data):
+        def write(temp_path):
+            with open(temp_path, "wb") as handle:
+                handle.write(data)
+
+        return write
+
+    def test_writes_and_returns_the_final_path_leaving_no_temp(self):
+        self.assertEqual(write_in_place(self.final, self.put(b"one")), self.final)
+        with open(self.final, "rb") as handle:
+            self.assertEqual(handle.read(), b"one")
+        self.assertEqual(os.listdir(self.dir), ["out.png"])
+
+    def test_overwrite_is_allowed(self):
+        write_in_place(self.final, self.put(b"one"))
+        write_in_place(self.final, self.put(b"two"))
+        with open(self.final, "rb") as handle:
+            self.assertEqual(handle.read(), b"two")
+
+    def test_a_failing_write_raises_leaves_no_temp_and_keeps_the_old_file(self):
+        write_in_place(self.final, self.put(b"old"))
+
+        def broken(temp_path):
+            with open(temp_path, "wb") as handle:
+                handle.write(b"half")
+            raise OSError("disk full")
+
+        with self.assertRaisesRegex(OSError, "disk full"):
+            write_in_place(self.final, broken)
+        self.assertEqual(os.listdir(self.dir), ["out.png"])
+        with open(self.final, "rb") as handle:
+            self.assertEqual(handle.read(), b"old")
+
+    def test_no_path_comes_back_when_the_rename_fails(self):
+        with mock.patch.object(os, "replace", side_effect=OSError("rename refused")):
+            with self.assertRaisesRegex(OSError, "rename refused"):
+                write_in_place(self.final, self.put(b"data"))
+        self.assertEqual(os.listdir(self.dir), [])
+
+    def items(self, count):
+        return [(os.path.join(self.dir, f"s.{n}.png"), self.put(b"new%d" % n)) for n in range(count)]
+
+    def test_all_frames_are_written_and_returned_in_order(self):
+        items = self.items(3)
+        self.assertEqual(write_all_in_place(items), [p for p, _ in items])
+        self.assertEqual(len(os.listdir(self.dir)), 3)
+
+    def test_a_failing_temp_write_mid_sequence_replaces_nothing(self):
+        items = self.items(3)
+        write_in_place(items[0][0], self.put(b"old"))
+
+        def broken(temp_path):
+            raise OSError("disk full")
+
+        items[2] = (items[2][0], broken)
+        with self.assertRaisesRegex(OSError, "disk full"):
+            write_all_in_place(items)
+        self.assertEqual(os.listdir(self.dir), ["s.0.png"])
+        with open(items[0][0], "rb") as handle:
+            self.assertEqual(handle.read(), b"old")
+
+    def test_a_failing_rename_mid_sequence_says_how_many_were_replaced(self):
+        real = os.replace
+        calls = []
+
+        def flaky(src, dst):
+            calls.append(dst)
+            if len(calls) == 3:
+                raise OSError("rename refused")
+            real(src, dst)
+
+        with mock.patch.object(os, "replace", side_effect=flaky):
+            with self.assertRaisesRegex(MarkerContractError, r"^WWAI_PARTIAL_WRITE: 2 of 4 frames were replaced"):
+                write_all_in_place(self.items(4))
+        self.assertEqual(sorted(os.listdir(self.dir)), ["s.0.png", "s.1.png"])
+
+    def test_an_interrupt_during_the_renames_is_not_reported_as_a_partial_write(self):
+        real = os.replace
+        calls = []
+
+        def interrupted(src, dst):
+            calls.append(dst)
+            if len(calls) == 2:
+                raise KeyboardInterrupt
+            real(src, dst)
+
+        with mock.patch.object(os, "replace", side_effect=interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                write_all_in_place(self.items(3))
+        self.assertEqual(os.listdir(self.dir), ["s.0.png"])
+
+    def test_a_missing_output_folder_fails_loud_and_is_not_created(self):
+        missing = os.path.join(self.dir, "nope", "out.png")
+        with self.assertRaises(FileNotFoundError):
+            write_in_place(missing, self.put(b"data"))
+        self.assertFalse(os.path.exists(os.path.dirname(missing)))
 
 
 if __name__ == "__main__":

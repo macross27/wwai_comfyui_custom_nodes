@@ -19,9 +19,13 @@ the prompt — the newer `is_output_node=True` has no effect on a class like
 these.
 """
 
+import itertools
 import json
 import logging
+import math
 import os
+import weakref
+from collections import OrderedDict
 from fractions import Fraction
 
 import av
@@ -36,10 +40,27 @@ from .wwai_markers_core import (
     check_staged_file,
     copy_file_verbatim,
     extension_of,
+    frame_pattern,
     is_staged_name,
+    RIPPLE_GRID_FPS,
+    RIPPLE_RESIZE_METHODS,
+    RIPPLE_VIDEO_UNUSABLE,
+    parse_keyframes,
+    parse_ripple_manifest,
+    ripple_grid_frame,
+    ripple_grid_slots,
+    plan_tracking,
     require_marker_name,
     require_single,
-    split_clicks,
+    require_storage_path,
+    sequence_frames,
+    split_items,
+    unannotated,
+    refuse_stale_frames,
+    require_folder,
+    require_contiguous,
+    write_all_in_place,
+    write_in_place,
 )
 
 logger = logging.getLogger(__name__)
@@ -92,6 +113,17 @@ try:
 except ImportError as exc:  # pragma: no cover - depends on the ComfyUI host
     _encode_image = _save_avif = inject_exr_metadata = inject_png_metadata = None
     IMAGE_ENCODER_IMPORT_ERROR = exc
+
+# ComfyUI's own SAM3 nodes and text encoder, which WWAIRotoTrack drives. It
+# calls them; it does not copy them.
+try:
+    from comfy_extras.nodes_sam3 import SAM3_Detect, SAM3_TrackToMask, SAM3_VideoTrack
+    from nodes import CLIPTextEncode  # ComfyUI's top-level nodes.py, not this file
+
+    SAM3_IMPORT_ERROR = None
+except ImportError as exc:  # pragma: no cover - depends on the ComfyUI host
+    SAM3_Detect = SAM3_TrackToMask = SAM3_VideoTrack = CLIPTextEncode = None
+    SAM3_IMPORT_ERROR = exc
 
 
 # --- socket types -----------------------------------------------------------
@@ -147,6 +179,11 @@ FILENAME_PREFIX = "wwai/WWAI"
 INPUT_CATEGORY = "WWAI/Expose"
 OUTPUT_CATEGORY = "WWAI/Expose Output"
 UTILITY_CATEGORY = "WWAI/Utility"
+
+# Kind and frame rate of the file a WWAIExposeImageOrVideo opened, so the
+# output marker writes the same kind back: {"kind": "image"|"video", "fps":
+# None for a picture, else the movie's frame rate as a Fraction}.
+MEDIA_INFO_TYPE = "WWAI_MEDIA_INFO"
 
 # Sentinel choice on every file-based input marker's dropdown that means "this
 # optional reference has no data for this run." It is always the first entry
@@ -274,6 +311,45 @@ def load_exr(path):
     return (image, mask.unsqueeze(0))
 
 
+def load_image_file(file):
+    """A picture file as (IMAGE, MASK). Staged-file refusals included."""
+    path = folder_paths.get_annotated_filepath(file)
+    check_staged_file(path, file)
+    if extension_of(path, "") == "exr":
+        return load_exr(path)
+    img = ImageOps.exif_transpose(Image.open(path))
+    rgb = np.array(img.convert("RGB")).astype(np.float32) / 255.0
+    image = torch.from_numpy(rgb)[None,]
+    if "A" in img.getbands():
+        alpha = np.array(img.getchannel("A")).astype(np.float32) / 255.0
+        mask = 1.0 - torch.from_numpy(alpha)
+    else:
+        mask = torch.zeros((64, 64), dtype=torch.float32)
+    return (image, mask.unsqueeze(0))
+
+
+def load_video_file(file):
+    """A movie file as (VIDEO, IMAGE frames, AUDIO or None, frame rate as a
+    Fraction). Staged-file refusals included. A file with no video stream
+    or no frame rate is refused: upstream's VideoFromFile would read it at
+    1 fps, and the mask movie would come back at the wrong rate."""
+    path = folder_paths.get_annotated_filepath(file)
+    check_staged_file(path, file)
+    try:
+        with av.open(path) as container:
+            streams = container.streams.video
+            rate = streams[0].average_rate if streams else None
+    except av.error.FFmpegError as exc:
+        raise MarkerContractError(f"WWAI_VIDEO_UNREADABLE: {file} cannot be opened as a movie ({exc})") from exc
+    if not rate:
+        raise MarkerContractError(f"WWAI_VIDEO_NO_FRAME_RATE: {file} has no video stream with a frame rate")
+    video = InputImpl.VideoFromFile(path)
+    components = video.get_components()
+    # audio is None when the file carries no sound track — the same thing
+    # GetVideoComponents passes on, and downstream audio ports are optional.
+    return (video, components.images, components.audio, components.frame_rate)
+
+
 class FileMarkerMixin:
     """Shared validation for the markers that open a file.
 
@@ -336,12 +412,16 @@ class WWAIExposeText:
         return (value,)
 
 
-class WWAIExposeClicks:
+class WWAIExposeKeyframes:
+    """The artist's clicks on any number of frames, for several objects, as
+    one text (grammar in wwai_markers_core.parse_keyframes). Checked for shape
+    here; WWAIRotoTrack checks it against the clip and the prompt."""
+
     CATEGORY = INPUT_CATEGORY
     FUNCTION = "expose"
-    RETURN_TYPES = ("STRING", "STRING", "BOUNDING_BOX", "BOUNDING_BOX", "INT")
-    RETURN_NAMES = ("include_points", "exclude_points", "include_boxes", "exclude_boxes", "frame")
-    DESCRIPTION = "Marks the artist's clicks (points and boxes) as controllable from WWAI."
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("keyframes",)
+    DESCRIPTION = "Marks the artist's clicks on several frames (keyframes) as controllable from WWAI."
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -355,7 +435,8 @@ class WWAIExposeClicks:
 
     def expose(self, value, name, description, required):
         require_marker_name(name, type(self).__name__)
-        return split_clicks(value)
+        parse_keyframes(value)
+        return (value,)
 
 
 class WWAIExposeInt:
@@ -577,19 +658,7 @@ class WWAIExposeImage(FileMarkerMixin):
         require_marker_name(name, type(self).__name__)
         if _is_no_file(file):
             return (None, None)
-        path = folder_paths.get_annotated_filepath(file)
-        check_staged_file(path, file)
-        if extension_of(path, "") == "exr":
-            return load_exr(path)
-        img = ImageOps.exif_transpose(Image.open(path))
-        rgb = np.array(img.convert("RGB")).astype(np.float32) / 255.0
-        image = torch.from_numpy(rgb)[None,]
-        if "A" in img.getbands():
-            alpha = np.array(img.getchannel("A")).astype(np.float32) / 255.0
-            mask = 1.0 - torch.from_numpy(alpha)
-        else:
-            mask = torch.zeros((64, 64), dtype=torch.float32)
-        return (image, mask.unsqueeze(0))
+        return load_image_file(file)
 
 
 class WWAIExposeVideo(FileMarkerMixin):
@@ -632,13 +701,259 @@ class WWAIExposeVideo(FileMarkerMixin):
         require_marker_name(name, type(self).__name__)
         if _is_no_file(file):
             return (None, None, None, 0.0)
-        path = folder_paths.get_annotated_filepath(file)
-        check_staged_file(path, file)
-        video = InputImpl.VideoFromFile(path)
-        components = video.get_components()
-        # audio is None when the file carries no sound track — the same thing
-        # GetVideoComponents passes on, and downstream audio ports are optional.
-        return (video, components.images, components.audio, float(components.frame_rate))
+        video, images, audio, frame_rate = load_video_file(file)
+        return (video, images, audio, float(frame_rate))
+
+
+class WWAIExposeImageOrVideo(FileMarkerMixin):
+    """One input that takes a picture or a movie, decoded by the same loader
+    as WWAIExposeImage / WWAIExposeVideo. `media_info` tells
+    WWAIExposeOutputImageOrVideo which kind to write back, and at what rate."""
+
+    CATEGORY = INPUT_CATEGORY
+    FUNCTION = "expose"
+    RETURN_TYPES = (IMAGE_TYPE, MEDIA_INFO_TYPE)
+    RETURN_NAMES = ("images", "media_info")
+    DESCRIPTION = (
+        "Opens a picture or a movie and marks it as an input WWAI supplies: "
+        "the frames (one for a picture) and the kind + frame rate for the "
+        "matching output marker."
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "file": (input_root_files(content_types=["image", "video"]),),
+                **metadata_widgets(),
+                **required_widget(),
+            }
+        }
+
+    def expose(self, file, name, description, required):
+        class_name = type(self).__name__
+        require_marker_name(name, class_name)
+        if _is_no_file(file):
+            return (None, None)
+        if folder_paths.filter_files_content_types([unannotated(file)], ["image"]):
+            image, _ = load_image_file(file)
+            return (image, {"kind": "image", "fps": None})
+        # Anything else goes to the movie loader WWAIExposeVideo uses, which
+        # refuses by name what it cannot read (an .mxf is application/mxf to
+        # mimetypes, yet a movie to both inputs).
+        _, images, _, frame_rate = load_video_file(file)
+        return (images, {"kind": "video", "fps": frame_rate})
+
+
+RIPPLE_WINDOW_MISMATCH = "WWAI_RIPPLE_WINDOW_MISMATCH"
+
+
+def _ripple_unusable(detail):
+    return MarkerContractError(f"{RIPPLE_VIDEO_UNUSABLE}: {detail}")
+
+
+def _ripple_mismatch(detail):
+    return MarkerContractError(f"{RIPPLE_WINDOW_MISMATCH}: {detail}")
+
+
+def _ripple_video_stream(container):
+    if not container.streams.video:
+        raise _ripple_unusable("the movie has no video stream")
+    return container.streams.video[0]
+
+
+def _played_video_stamps(path):
+    """The time base, the played packets' pts (demuxed, nothing decoded) and where the
+    last of them stops (its pts + duration). Packets flagged discard are not played,
+    as WWAI's ffprobe reading counts them."""
+    with av.open(path) as container:
+        stream = _ripple_video_stream(container)
+        stamps, last = [], None
+        for packet in container.demux(stream):
+            if not packet.size or packet.is_discard:
+                continue  # the demuxer's closing empty packet, or one the player drops
+            if packet.pts is None:
+                raise _ripple_unusable("a frame of the movie has no time stamp")
+            stamps.append(packet.pts)
+            if last is None or packet.pts > last[0]:
+                last = (packet.pts, packet.duration)
+        if last is None:
+            raise _ripple_unusable("the movie has no played video frame")
+        if not last[1] or last[1] < 0:
+            raise _ripple_unusable("the movie's last frame has no duration")
+        return stream.time_base, stamps, last[0] + last[1]
+
+
+def _first_decoded_frame(path):
+    with av.open(path) as container:
+        frame = next(container.decode(_ripple_video_stream(container)), None)
+    if frame is None or frame.pts is None:
+        raise _ripple_unusable("the movie decodes no frame with a time stamp")
+    return frame
+
+
+def _decode_window(path, window, played, width, height):
+    """The window's pictures as uint8 [len(window), height, width, 3], decoding from the
+    keyframe before its first frame and stopping after its last; nothing else is kept."""
+    wanted, low, high = set(window), min(window), max(window)
+    pictures = {}
+    with av.open(path) as container:
+        stream = _ripple_video_stream(container)
+        stream.thread_type = "AUTO"
+        container.seek(low, stream=stream, backward=True)
+        for frame in container.decode(stream):
+            if frame.pts is None:
+                raise _ripple_unusable("a decoded frame has no time stamp")
+            if frame.pts > high:
+                break
+            if frame.pts < low:
+                continue
+            if frame.pts not in played:
+                raise _ripple_mismatch(f"the decoder returned a frame at pts {frame.pts} that the movie's packets do not list")
+            if frame.pts in wanted:
+                pictures[frame.pts] = frame.to_ndarray(width=width, height=height, format="rgb24", interpolation="LANCZOS")
+                if len(pictures) == len(wanted):
+                    break
+    missing = sorted(wanted - set(pictures))
+    if missing:
+        raise _ripple_unusable(f"{len(missing)} window frames did not decode (first at pts {missing[0]})")
+    return np.stack([pictures[pts] for pts in window])
+
+
+def _ripple_audio(path, start, length):
+    """The first sound track from *start* seconds for *length* grid frames, as AUDIO, or
+    None when the movie has no sound. Where the track has no sound the window is silent."""
+    with av.open(path) as container:
+        if not container.streams.audio:
+            return None
+        stream = container.streams.audio[0]
+        rate = stream.codec_context.sample_rate
+        first, count = round(start * rate), round(Fraction(length, RIPPLE_GRID_FPS) * rate)
+        waveform = np.zeros((stream.codec_context.layout.nb_channels, count), dtype=np.float32)
+        resampler = av.AudioResampler(format="fltp", layout=stream.codec_context.layout, rate=rate)
+        if start > 1:
+            container.seek(math.floor((start - 1) / stream.time_base), stream=stream, backward=True)
+        for frame in itertools.chain(container.decode(stream), (None,)):
+            for samples in resampler.resample(frame):
+                if samples.pts is None:
+                    raise _ripple_unusable("a piece of the sound track has no time stamp")
+                offset = round(samples.pts * samples.time_base * rate) - first
+                if offset >= count:
+                    return {"waveform": torch.from_numpy(waveform).unsqueeze(0), "sample_rate": rate}
+                low, high = max(0, offset), min(count, offset + samples.samples)
+                if high > low:
+                    waveform[:, low:high] = samples.to_ndarray()[:, low - offset : high - offset]
+    return {"waveform": torch.from_numpy(waveform).unsqueeze(0), "sample_rate": rate}
+
+
+def read_ripple_window(path, job):
+    """The job's window cut from the ORIGINAL movie in memory: (IMAGE, AUDIO or None).
+
+    Re-derives the shot's 24 fps grid from the movie itself (ripple_grid_slots, the
+    rule WWAI ran on its own reading) and refuses WWAI_RIPPLE_WINDOW_MISMATCH when the
+    two readings disagree: another time base, a window past the shot's end, an edit
+    whose pts does not land on its window frame, or a decode size larger than the
+    movie. Nothing is shifted to make them agree."""
+    start, length = job["window_start"], job["length"]
+    try:
+        time_base, stamps, end_pts = _played_video_stamps(path)
+        if time_base != Fraction(job["time_base"]):
+            raise _ripple_mismatch(f"the movie's time base is {time_base}, the job says {job['time_base']}")
+        first = _first_decoded_frame(path)
+        if first.rotation % 360:
+            raise _ripple_unusable(f"the movie is stored rotated by {first.rotation} degrees")
+        if job["decode_width"] > first.width or job["decode_height"] > first.height:
+            raise _ripple_mismatch(
+                f"the job decodes at {job['decode_width']}x{job['decode_height']}, "
+                f"larger than the movie's {first.width}x{first.height}"
+            )
+        p0 = first.pts
+        slots = ripple_grid_slots(stamps, p0, end_pts, time_base)
+        if start + length > len(slots):
+            raise _ripple_mismatch(
+                f"the window ends at grid frame {start + length}, the movie has {len(slots)} grid frames"
+            )
+        ordered = sorted(stamps)
+        next_of = dict(zip(ordered, ordered[1:] + [end_pts]))
+        for marker in job["markers"]:
+            frame, pts = marker["frame"], marker["pts"]
+            if pts not in next_of:
+                raise _ripple_mismatch(f"no frame of the movie has pts {pts} (the edit for window frame {frame})")
+            shown = ripple_grid_frame(pts, next_of[pts], p0, time_base)
+            if shown != start + frame:
+                where = "on no grid frame" if shown is None else f"at grid frame {shown}"
+                raise _ripple_mismatch(
+                    f"the edit for window frame {frame} has pts {pts}, which the movie shows {where}, "
+                    f"not at grid frame {start + frame}"
+                )
+        window = slots[start : start + length]
+        pixels = _decode_window(path, window, next_of, job["decode_width"], job["decode_height"])
+        audio = _ripple_audio(path, (p0 * time_base) + Fraction(start, RIPPLE_GRID_FPS), length)
+    except av.error.FFmpegError as exc:
+        raise _ripple_unusable(f"the movie cannot be read ({exc})") from exc
+    return torch.from_numpy(pixels.astype(np.float32) / 255.0), audio
+
+
+def check_ripple_edit(path):
+    """Refuse an edit picture over PIL's pixel limit or one that does not fully load."""
+    try:
+        with Image.open(path) as img:
+            if Image.MAX_IMAGE_PIXELS is not None and img.width * img.height > Image.MAX_IMAGE_PIXELS:
+                raise MarkerContractError("WWAI_RIPPLE_EDIT_UNUSABLE: an edited picture is over the pixel limit")
+            img.load()
+    except (OSError, SyntaxError, Image.DecompressionBombError) as exc:
+        raise MarkerContractError(f"WWAI_RIPPLE_EDIT_UNUSABLE: an edited picture cannot be loaded ({exc})") from exc
+
+
+class WWAIExposeRippleJob:
+    """One Ripple job (the original movie, the window on its 24 fps grid, the edited
+    pictures and each one's window frame and pts) as one text (grammar in
+    wwai_markers_core.parse_ripple_manifest). Checks every file, cuts the window in
+    memory (read_ripple_window), then feeds WepeNerd's From Frames exactly that window."""
+
+    CATEGORY = INPUT_CATEGORY
+    FUNCTION = "expose"
+    RETURN_TYPES = (
+        IMAGE_TYPE, AUDIO_TYPE, "FLOAT", "FLOAT", "FLOAT", "INT", "STRING", "BOOLEAN",
+        list(RIPPLE_RESIZE_METHODS), "INT", "INT",
+    )
+    RETURN_NAMES = (
+        "images", "audio", "frame_rate", "duration", "megapixels", "window_start", "markers",
+        "allow_upscale", "resize_method", "output_width", "output_height",
+    )
+    DESCRIPTION = "Marks a Ripple job WWAI supplies: wire it into H3 Ripple From Frames."
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "value": ("STRING", {"multiline": True, "default": ""}),
+                **metadata_widgets(),
+                **required_widget(),
+            }
+        }
+
+    def expose(self, value, name, description, required):
+        require_marker_name(name, type(self).__name__)
+        job = parse_ripple_manifest(value)
+        for marker in job["markers"]:
+            edit_path = folder_paths.get_annotated_filepath(marker["edited"])
+            check_staged_file(edit_path, marker["edited"])
+            check_ripple_edit(edit_path)
+        video_path = folder_paths.get_annotated_filepath(job["video"])
+        check_staged_file(video_path, job["video"])
+        length = job["length"]
+        images, audio = read_ripple_window(video_path, job)
+        markers = json.dumps(
+            [
+                {"id": i + 1, "frame": m["frame"], "edited": m["edited"], "edited_at": m["frame"]}
+                for i, m in enumerate(job["markers"])
+            ]
+        )
+        return (
+            images, audio, 24.0, length / 24, float(job["megapixels"]), 0, markers,
+            job["allow_upscale"], job["resize_method"], job["output_width"], job["output_height"],
+        )
 
 
 class WWAIExposeAudio(FileMarkerMixin):
@@ -889,6 +1204,41 @@ class WWAIExposeOutputVideo(AlwaysRerunMixin):
         return wwai_result(entry)
 
 
+class WWAIExposeOutputImageOrVideo(AlwaysRerunMixin):
+    """Writes frames back as the kind its WWAIExposeImageOrVideo opened: a
+    PNG for a picture, an MP4 at the movie's own frame rate for a movie.
+    `media_info` is required and has no fallback rate."""
+
+    CATEGORY = OUTPUT_CATEGORY
+    FUNCTION = "expose"
+    RETURN_TYPES = ()
+    OUTPUT_NODE = True
+    DESCRIPTION = "Saves the finished frames as a picture or a movie, matching the input, and marks it as WWAI's result."
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": (IMAGE_TYPE,),
+                "media_info": (MEDIA_INFO_TYPE,),
+                **metadata_widgets(),
+            },
+            "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
+        }
+
+    def expose(self, images, media_info, name, description, prompt=None, extra_pnginfo=None):
+        class_name = type(self).__name__
+        require_marker_name(name, class_name)
+        kind = (media_info or {}).get("kind")
+        if kind == "image":
+            return WWAIExposeOutputImage().expose(
+                value=images, name=name, description=description, prompt=prompt, extra_pnginfo=extra_pnginfo
+            )
+        if kind == "video":
+            return WWAIExposeOutputVideo().expose(name, description, images=images, fps=media_info["fps"])
+        raise MarkerContractError(f"{class_name}: media_info names no picture or movie: {media_info!r}.")
+
+
 class WWAIExposeOutputAudio(AlwaysRerunMixin):
     CATEGORY = OUTPUT_CATEGORY
     FUNCTION = "expose"
@@ -975,6 +1325,25 @@ class WWAIExposeOutputMesh(AlwaysRerunMixin):
         return wwai_result(entry)
 
 
+class WWAIExposeOutputText(AlwaysRerunMixin):
+    CATEGORY = OUTPUT_CATEGORY
+    FUNCTION = "expose"
+    RETURN_TYPES = ()
+    OUTPUT_NODE = True
+    DESCRIPTION = "Marks a finished text (for example the path a Save To Path node wrote) as WWAI's result."
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"value": ("STRING", {"forceInput": True}), **metadata_widgets()}}
+
+    def expose(self, value, name, description):
+        class_name = type(self).__name__
+        require_marker_name(name, class_name)
+        if not isinstance(value, str) or not value:
+            raise MarkerContractError(f"{class_name}: the text to report is empty or not text.")
+        return wwai_result({"text": value})
+
+
 class WWAIRefuseBlankMask:
     """Not a marker (no WWAIExpose prefix): fails a mask run that found nothing."""
 
@@ -990,37 +1359,330 @@ class WWAIRefuseBlankMask:
 
     def expose(self, images):
         # Whole batch: a video with some blank frames and some masked frames passes.
-        if images.max() <= 0:
-            raise MarkerContractError(
-                "WWAI_NOTHING_FOUND: The prompt found nothing in this file. Try other words."
-            )
+        # An empty batch is nothing found too (torch refuses max() on it).
+        if images.numel() == 0 or images.max() <= 0:
+            raise MarkerContractError("WWAI_NOTHING_FOUND: Nothing was found, so no mask was made.")
         return (images,)
+
+
+def _load_png_sequence(path, class_name):
+    """(frames, first frame number) of a ``name.%04d.png`` sequence, as RGB float32 in [0, 1]."""
+    if not path.lower().endswith(".png"):
+        raise MarkerContractError(f"WWAI_PATH_REFUSED: {class_name}: source path {path!r} is not a .png sequence")
+    frames = require_contiguous(sequence_frames(path, class_name), path, class_name)
+    arrays = []
+    for number, frame_path in frames:
+        with Image.open(frame_path) as img:
+            arrays.append(np.array(img.convert("RGB")).astype(np.float32) / 255.0)
+        if arrays[-1].shape != arrays[0].shape:
+            raise MarkerContractError(
+                f"WWAI_SEQUENCE_MISMATCH: {class_name}: frame {number} is {arrays[-1].shape[1]}x{arrays[-1].shape[0]}, "
+                f"the first frame is {arrays[0].shape[1]}x{arrays[0].shape[0]}"
+            )
+    return torch.from_numpy(np.stack(arrays)), frames[0][0]
+
+
+def _load_movie(path, class_name):
+    """(frames, frame rate) of a movie file, as RGB float32 in [0, 1]."""
+    try:
+        with av.open(path) as container:
+            streams = container.streams.video
+            rate = streams[0].average_rate if streams else None
+            if not rate:
+                raise MarkerContractError(
+                    f"WWAI_VIDEO_NO_FRAME_RATE: {class_name}: {path} has no video stream with a frame rate"
+                )
+            arrays = [f.to_ndarray(format="rgb24").astype(np.float32) / 255.0 for f in container.decode(video=0)]
+    except av.error.FFmpegError as exc:
+        raise MarkerContractError(f"WWAI_VIDEO_UNREADABLE: {class_name}: {path} cannot be opened as a movie ({exc})") from exc
+    if not arrays:
+        raise MarkerContractError(f"WWAI_VIDEO_UNREADABLE: {class_name}: {path} has no video frames")
+    return torch.from_numpy(np.stack(arrays)), float(rate)
+
+
+class WWAILoadFromPath:
+    """Not a marker: reads a plate straight from studio storage, by path."""
+
+    CATEGORY = UTILITY_CATEGORY
+    FUNCTION = "expose"
+    RETURN_TYPES = (IMAGE_TYPE, "INT", "FLOAT")
+    RETURN_NAMES = ("images", "first_frame", "fps")
+    DESCRIPTION = (
+        "Reads a movie file or a PNG sequence (name.%04d.png) from /storenext/ and returns "
+        "its frames, the first frame number and the frame rate (0 for a PNG sequence)."
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"path": ("STRING", {"default": "", "multiline": False})}}
+
+    @classmethod
+    def IS_CHANGED(cls, path):
+        # Re-read only when a source file changed. A refused or missing path
+        # reports NaN so the run executes and fails loud in expose().
+        try:
+            require_storage_path(path, cls.__name__, "source path")
+            if frame_pattern(path) is None:
+                files = [path]
+            else:
+                files = [p for _, p in sequence_frames(path, cls.__name__)]
+            return (path, *((os.path.getmtime(f), os.path.getsize(f)) for f in files))
+        except (MarkerContractError, OSError):
+            return float("nan")
+
+    def expose(self, path):
+        class_name = type(self).__name__
+        require_storage_path(path, class_name, "source path")
+        if frame_pattern(path) is not None:
+            images, first_frame = _load_png_sequence(path, class_name)
+            return (images, first_frame, 0.0)
+        images, fps = _load_movie(path, class_name)
+        return (images, 1, fps)
+
+
+class WWAISaveToPath(AlwaysRerunMixin):
+    """Not a marker: writes finished frames straight to studio storage, by path."""
+
+    CATEGORY = UTILITY_CATEGORY
+    FUNCTION = "expose"
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("path",)
+    DESCRIPTION = (
+        "Writes PNG files under /storenext/: one file, or a sequence when the path has a "
+        "%04d token. Each file is written to a temp name then renamed, and an existing "
+        "file is overwritten. Returns the path only after every file is in place."
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": (IMAGE_TYPE,),
+                "path": ("STRING", {"default": "", "multiline": False}),
+                "first_frame": ("INT", {"default": 1, "min": 0, "max": 9999999}),
+                "bit_depth": (["16-bit", "8-bit"], {"default": "16-bit"}),
+            }
+        }
+
+    def expose(self, images, path, first_frame, bit_depth):
+        class_name = type(self).__name__
+        require_storage_path(path, class_name, "output path")
+        if not path.rpartition("/")[2].lower().endswith(".png"):
+            raise MarkerContractError(f"WWAI_PATH_REFUSED: {class_name}: output path {path!r} must end in .png")
+        if IMAGE_ENCODER_IMPORT_ERROR is not None:
+            raise RuntimeError(
+                f"{class_name}: this ComfyUI has no Save Image (Advanced) encoders "
+                f"(comfy_extras.nodes_images): {IMAGE_ENCODER_IMPORT_ERROR}"
+            )
+
+        def writer(image):
+            def write(temp_path):
+                with open(temp_path, "wb") as handle:
+                    handle.write(_encode_image(image, "png", bit_depth, "sRGB"))
+
+            return write
+
+        pattern = frame_pattern(path)
+        if pattern is None:
+            image = require_single(list(images), class_name, "image")
+            require_folder(os.path.dirname(path), class_name)
+            write_in_place(path, writer(image))
+            return (path,)
+
+        directory, prefix, width, suffix = pattern
+        frames = list(images)
+        if not frames:
+            raise MarkerContractError(f"{class_name}: expected at least 1 image, got 0.")
+        last = first_frame + len(frames) - 1
+        if len(str(last)) > width:
+            raise MarkerContractError(
+                f"WWAI_PATH_REFUSED: {class_name}: output path {path!r} cannot hold frame {last} "
+                f"in {width} digits, and a reader would not find it"
+            )
+        refuse_stale_frames(path, first_frame, last, class_name)
+        write_all_in_place(
+            [
+                (f"{directory}/{prefix}{str(first_frame + offset).zfill(width)}{suffix}", writer(image))
+                for offset, image in enumerate(frames)
+            ]
+        )
+        return (path,)
+
+
+# One-frame layer results, so a click that changes one object does not re-run
+# the others (the prompt layer's detect + track is ~0.3 s of a warm click).
+# Keyed by every input the layer reads; the frames, model and clip are matched
+# by identity through weak references, so a freed object never matches.
+# Each mask is stored as its own copy, never a view into the track's whole
+# batch. The frames carry no in-place counter: ComfyUI runs nodes under
+# torch.inference_mode(), and its own output cache already treats a node's
+# output as unchanged for as long as the same object lives.
+# ponytail: 8 entries, one-frame runs only (one copied mask each); a
+# multi-frame Track is never cached, so memory stays at 8 masks.
+_LAYER_CACHE_SIZE = 8
+_LAYER_CACHE = OrderedDict()
+
+
+def _number(kind, tooltip, **limits):
+    # No default on purpose: a workflow that leaves one out fails ComfyUI's own
+    # required-input check instead of running on a number nobody chose.
+    return (kind, {**limits, "tooltip": tooltip})
+
+
+class WWAIRotoTrack:
+    """Not a marker: follows each clicked object (and the prompt) through the
+    frames, from the nearest frame it was clicked on, and returns the union.
+
+    Object 0 is the prompt's layer (only when the prompt is not blank): its
+    keyframes' clicks refine the prompt; with none it is keyed at frame 0.
+    Objects 1..N are click layers. Every output frame takes, per layer, the
+    track from its nearest keyframe (a tie goes to the earlier one); the
+    SAM3_VideoTrack runs are exactly wwai_markers_core.plan_tracking's, which
+    WWAI counts to cap a run. It never raises nothing-found: a blank result is
+    returned, and WWAIRefuseBlankMask after it decides.
+    """
+
+    CATEGORY = UTILITY_CATEGORY
+    FUNCTION = "expose"
+    RETURN_TYPES = (IMAGE_TYPE,)
+    RETURN_NAMES = ("mask",)
+    DESCRIPTION = "Tracks clicked objects and a typed prompt through the frames from clicks on several frames; white = object."
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        threshold = {"min": 0.0, "max": 1.0, "step": 0.01}
+        return {
+            "required": {
+                "frames": (IMAGE_TYPE,),
+                "model": ("MODEL",),
+                "clip": ("CLIP", {"tooltip": "The SAM3 checkpoint's text encoder, for the prompt."}),
+                "keyframes": ("STRING", {"forceInput": True}),
+                "prompt": ("STRING", {"default": "", "tooltip": "What to find; blank tracks the clicks only."}),
+                "prompt_threshold": _number("FLOAT", "Prompt layer: SAM3_VideoTrack detection_threshold.", **threshold),
+                "prompt_max_objects": _number("INT", "Prompt layer: SAM3_VideoTrack max_objects (0 = 64).", min=0, max=64),
+                "prompt_detect_interval": _number("INT", "Prompt layer: SAM3_VideoTrack detect_interval.", min=1),
+                "click_threshold": _number("FLOAT", "Click layers: SAM3_VideoTrack detection_threshold.", **threshold),
+                "click_max_objects": _number("INT", "Click layers: SAM3_VideoTrack max_objects (0 = 64).", min=0, max=64),
+                "click_detect_interval": _number("INT", "Click layers: SAM3_VideoTrack detect_interval.", min=1),
+                "detect_threshold": _number("FLOAT", "SAM3_Detect threshold at each keyframe.", **threshold),
+                "refine_iterations": _number("INT", "SAM3_Detect refine_iterations at each keyframe.", min=0, max=5),
+            }
+        }
+
+    def expose(self, frames, model, clip, keyframes, prompt,
+               prompt_threshold, prompt_max_objects, prompt_detect_interval,
+               click_threshold, click_max_objects, click_detect_interval,
+               detect_threshold, refine_iterations):
+        prompt_set = bool(prompt.strip())
+        (first, last), layers = plan_tracking(keyframes, frames.shape[0], prompt_set)
+        detect = (detect_threshold, refine_iterations)
+        encoded = []
+
+        def conditioning():
+            if not encoded:
+                encoded.append(CLIPTextEncode().encode(clip, prompt)[0])
+            return encoded[0]
+
+        union = {}
+        for obj, spans in layers:
+            if obj == 0:
+                settings = (prompt_threshold, prompt_max_objects, prompt_detect_interval)
+            else:
+                settings = (click_threshold, click_max_objects, click_detect_interval)
+            still = obj == 0 and frames.shape[0] == 1
+            run = lambda: self._layer(frames, model, conditioning() if obj == 0 else None, spans, settings, detect, still)
+            if first != last:
+                layer = run()
+            else:
+                key = (obj == 0, prompt if obj == 0 else None, json.dumps(spans), settings, detect)
+                layer = _cached_layer(key, (frames, model, clip), run)
+            for frame, mask in layer.items():
+                union[frame] = mask if frame not in union else torch.maximum(union[frame], mask)
+        mask = torch.stack([union[frame] for frame in range(first, last + 1)])
+        return (torch.stack((mask, mask, mask), dim=-1),)
+
+    @staticmethod
+    def _layer(frames, model, cond, spans, settings, detect, still=False):
+        """{clip frame: mask} for one layer: each span's frames from its keyframe's track.
+
+        ``still`` (the prompt layer on a one-frame picture) is the old picture
+        tool's rule: SAM3_Detect alone, so "man" is the one best match and
+        "man:5" up to five. SAM3_VideoTrack drops that count and takes every
+        match, which is the movie rule."""
+        layer = {}
+        for span in spans:
+            initial = None
+            if span.items is not None or still:
+                include_points, exclude_points, include_boxes, _ = split_items(span.items or [])
+                # SAM3_Detect has no exclude-box input; today's SAM3 tools drop them too.
+                initial = SAM3_Detect.execute(
+                    model=model, image=frames[span.key : span.key + 1], conditioning=cond,
+                    bboxes=include_boxes or None, positive_coords=include_points if span.items else None,
+                    negative_coords=exclude_points if span.items else None, threshold=detect[0],
+                    refine_iterations=detect[1], individual_masks=False,
+                ).args[0]
+            if still:
+                layer[span.key] = initial[0]
+                continue
+            for start, end in span.calls:
+                if end >= start:
+                    order, images = range(start, end + 1), frames[start : end + 1]
+                else:
+                    order, images = range(start, end - 1, -1), torch.flip(frames[end : start + 1], dims=(0,))
+                track = SAM3_VideoTrack.execute(
+                    images=images, model=model, initial_mask=initial, conditioning=cond,
+                    detection_threshold=settings[0], max_objects=settings[1], detect_interval=settings[2],
+                ).args[0]
+                masks = SAM3_TrackToMask.execute(track_data=track, object_indices="").args[0]
+                for index, frame in enumerate(order):
+                    if span.first <= frame <= span.last:
+                        layer.setdefault(frame, masks[index])
+        return layer
+
+
+def _cached_layer(key, objects, run):
+    hit = _LAYER_CACHE.get(key)
+    if hit is not None and all(ref() is obj for ref, obj in zip(hit[0], objects)):
+        _LAYER_CACHE.move_to_end(key)
+        return hit[1]
+    layer = {frame: mask.clone() for frame, mask in run().items()}
+    _LAYER_CACHE[key] = ([weakref.ref(obj) for obj in objects], layer)
+    _LAYER_CACHE.move_to_end(key)
+    while len(_LAYER_CACHE) > _LAYER_CACHE_SIZE:
+        _LAYER_CACHE.popitem(last=False)
+    return layer
 
 
 # --- registration -----------------------------------------------------------
 
 NODE_CLASS_MAPPINGS = {
     "WWAIExposeText": WWAIExposeText,
-    "WWAIExposeClicks": WWAIExposeClicks,
+    "WWAIExposeKeyframes": WWAIExposeKeyframes,
     "WWAIExposeInt": WWAIExposeInt,
     "WWAIExposeFloat": WWAIExposeFloat,
     "WWAIExposeBool": WWAIExposeBool,
     "WWAIExposeCombo": WWAIExposeCombo,
     "WWAIExposeImage": WWAIExposeImage,
     "WWAIExposeOutputImage": WWAIExposeOutputImage,
+    "WWAIExposeOutputText": WWAIExposeOutputText,
     "WWAIRefuseBlankMask": WWAIRefuseBlankMask,
+    "WWAILoadFromPath": WWAILoadFromPath,
+    "WWAISaveToPath": WWAISaveToPath,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "WWAIExposeText": "WWAI Expose Text",
-    "WWAIExposeClicks": "WWAI Expose Clicks",
+    "WWAIExposeKeyframes": "WWAI Expose Keyframes",
     "WWAIExposeInt": "WWAI Expose Int",
     "WWAIExposeFloat": "WWAI Expose Float",
     "WWAIExposeBool": "WWAI Expose Bool",
     "WWAIExposeCombo": "WWAI Expose Combo",
     "WWAIExposeImage": "WWAI Expose Image",
     "WWAIExposeOutputImage": "WWAI Expose Output Image",
+    "WWAIExposeOutputText": "WWAI Expose Output Text",
     "WWAIRefuseBlankMask": "WWAI Refuse Blank Mask",
+    "WWAILoadFromPath": "WWAI Load From Path",
+    "WWAISaveToPath": "WWAI Save To Path",
 }
 
 # The video and 3D markers need payload classes an older ComfyUI does not
@@ -1031,6 +1693,9 @@ if MEDIA_PAYLOADS_IMPORT_ERROR is None:
     NODE_CLASS_MAPPINGS.update(
         {
             "WWAIExposeVideo": WWAIExposeVideo,
+            "WWAIExposeRippleJob": WWAIExposeRippleJob,
+            "WWAIExposeImageOrVideo": WWAIExposeImageOrVideo,
+            "WWAIExposeOutputImageOrVideo": WWAIExposeOutputImageOrVideo,
             "WWAIExposeMesh": WWAIExposeMesh,
             "WWAIExposeOutputVideo": WWAIExposeOutputVideo,
             "WWAIExposeOutputAudio": WWAIExposeOutputAudio,
@@ -1040,6 +1705,9 @@ if MEDIA_PAYLOADS_IMPORT_ERROR is None:
     NODE_DISPLAY_NAME_MAPPINGS.update(
         {
             "WWAIExposeVideo": "WWAI Expose Video",
+            "WWAIExposeRippleJob": "WWAI Expose Ripple Job",
+            "WWAIExposeImageOrVideo": "WWAI Expose Image Or Video",
+            "WWAIExposeOutputImageOrVideo": "WWAI Expose Output Image Or Video",
             "WWAIExposeMesh": "WWAI Expose Mesh",
             "WWAIExposeOutputVideo": "WWAI Expose Output Video",
             "WWAIExposeOutputAudio": "WWAI Expose Output Audio",
@@ -1052,6 +1720,16 @@ else:
         "because comfy_api.latest could not be imported (%s). Update ComfyUI "
         "to a build that ships comfy_api.latest (IO, UI, InputImpl, Types).",
         MEDIA_PAYLOADS_IMPORT_ERROR,
+    )
+
+if SAM3_IMPORT_ERROR is None:
+    NODE_CLASS_MAPPINGS["WWAIRotoTrack"] = WWAIRotoTrack
+    NODE_DISPLAY_NAME_MAPPINGS["WWAIRotoTrack"] = "WWAI Roto Track"
+else:
+    logger.warning(
+        "WWAI markers: WWAIRotoTrack is unavailable because ComfyUI's SAM3 nodes "
+        "(comfy_extras.nodes_sam3) or CLIPTextEncode could not be imported (%s).",
+        SAM3_IMPORT_ERROR,
     )
 
 if AUDIO_LOADER_IMPORT_ERROR is None:

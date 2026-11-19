@@ -1,0 +1,295 @@
+{
+  "grid": [
+    {
+      "name": "24 fps from zero: one grid frame per source frame",
+      "time_base": "1/12288",
+      "p0": 0,
+      "pts": [
+        0,
+        512,
+        1024,
+        1536,
+        2048
+      ],
+      "end_pts": 2560,
+      "frames": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ],
+      "count": 5
+    },
+    {
+      "name": "23.976 fps: six frames, six grid frames",
+      "time_base": "1/24000",
+      "p0": 0,
+      "pts": [
+        0,
+        1001,
+        2002,
+        3003,
+        4004,
+        5005
+      ],
+      "end_pts": 6006,
+      "frames": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "count": 6
+    },
+    {
+      "name": "30 fps starting at 0.1 s: the grid skips the 3rd and 8th frames",
+      "time_base": "1/15360",
+      "p0": 1536,
+      "pts": [
+        1536,
+        2048,
+        2560,
+        3072,
+        3584,
+        4096,
+        4608,
+        5120,
+        5632,
+        6144
+      ],
+      "end_pts": 6656,
+      "frames": [
+        0,
+        1,
+        null,
+        2,
+        3,
+        4,
+        5,
+        null,
+        6,
+        7
+      ],
+      "count": 8
+    },
+    {
+      "name": "25 fps over 26 frames: the 13th frame is never shown",
+      "time_base": "1/12800",
+      "p0": 0,
+      "pts": [
+        0,
+        512,
+        1024,
+        1536,
+        2048,
+        2560,
+        3072,
+        3584,
+        4096,
+        4608,
+        5120,
+        5632,
+        6144,
+        6656,
+        7168,
+        7680,
+        8192,
+        8704,
+        9216,
+        9728,
+        10240,
+        10752,
+        11264,
+        11776,
+        12288,
+        12800
+      ],
+      "end_pts": 13312,
+      "frames": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        null,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24
+      ],
+      "count": 25
+    },
+    {
+      "name": "12 fps: every frame shows on two grid frames",
+      "time_base": "1/12288",
+      "p0": 0,
+      "pts": [
+        0,
+        1024,
+        2048
+      ],
+      "end_pts": 3072,
+      "frames": [
+        0,
+        2,
+        4
+      ],
+      "count": 6
+    },
+    {
+      "name": "begins mid-GOP: packets before the first decoded frame show nowhere",
+      "time_base": "1/12288",
+      "p0": 0,
+      "pts": [
+        -1024,
+        -512,
+        0,
+        512,
+        1024
+      ],
+      "end_pts": 1536,
+      "frames": [
+        null,
+        null,
+        0,
+        1,
+        2
+      ],
+      "count": 3
+    },
+    {
+      "name": "a frame starting exactly on a half grid step first shows on the next grid frame",
+      "time_base": "1/48",
+      "p0": 0,
+      "pts": [
+        0,
+        1,
+        3
+      ],
+      "end_pts": 4,
+      "frames": [
+        0,
+        1,
+        null
+      ],
+      "count": 2
+    }
+  ],
+  "window_bytes": [
+    {
+      "name": "4K plate, 22-frame window, resized to 2.0736 MP, 48 kHz stereo",
+      "decode_width": 3840,
+      "decode_height": 2160,
+      "length": 22,
+      "megapixels": 2.0736,
+      "allow_upscale": false,
+      "output_width": 0,
+      "output_height": 0,
+      "audio_rate": 48000,
+      "audio_channels": 2,
+      "edits": 1,
+      "window_decoded_bytes": 2190073600,
+      "bytes": 2766794240,
+      "gpu_check": false
+    },
+    {
+      "name": "small plate upscaled to 3.6864 MP, no sound",
+      "decode_width": 640,
+      "decode_height": 360,
+      "length": 22,
+      "megapixels": 3.6864,
+      "allow_upscale": true,
+      "output_width": 0,
+      "output_height": 0,
+      "audio_rate": 0,
+      "audio_channels": 0,
+      "edits": 3,
+      "window_decoded_bytes": 60825600,
+      "bytes": 1166745600,
+      "gpu_check": false
+    },
+    {
+      "name": "explicit output size 960x540, 39 frames, 44.1 kHz mono",
+      "decode_width": 1920,
+      "decode_height": 1080,
+      "length": 39,
+      "megapixels": 1.0,
+      "allow_upscale": false,
+      "output_width": 960,
+      "output_height": 540,
+      "audio_rate": 44100,
+      "audio_channels": 1,
+      "edits": 2,
+      "window_decoded_bytes": 970731448,
+      "bytes": 1227868016,
+      "gpu_check": false
+    },
+    {
+      "name": "pack-sized window with 8 kHz mono sound",
+      "decode_width": 32,
+      "decode_height": 18,
+      "length": 22,
+      "megapixels": 0.25,
+      "allow_upscale": false,
+      "output_width": 0,
+      "output_height": 0,
+      "audio_rate": 8000,
+      "audio_channels": 1,
+      "edits": 1,
+      "window_decoded_bytes": 181396,
+      "bytes": 487976,
+      "gpu_check": true
+    },
+    {
+      "name": "pack-sized window with no sound",
+      "decode_width": 32,
+      "decode_height": 18,
+      "length": 22,
+      "megapixels": 0.25,
+      "allow_upscale": false,
+      "output_width": 0,
+      "output_height": 0,
+      "audio_rate": 0,
+      "audio_channels": 0,
+      "edits": 3,
+      "window_decoded_bytes": 152064,
+      "bytes": 443136,
+      "gpu_check": true
+    },
+    {
+      "name": "pack-sized 64x36 window shrunk to 42x22 on a 64x32 canvas, 8 kHz mono, two edits",
+      "decode_width": 64,
+      "decode_height": 36,
+      "length": 22,
+      "megapixels": 0.001,
+      "allow_upscale": false,
+      "output_width": 0,
+      "output_height": 0,
+      "audio_rate": 8000,
+      "audio_channels": 1,
+      "edits": 2,
+      "window_decoded_bytes": 637588,
+      "bytes": 1229768,
+      "gpu_check": true
+    }
+  ]
+}

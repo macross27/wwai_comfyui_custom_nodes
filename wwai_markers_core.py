@@ -7,13 +7,18 @@ refusing a marker that would produce an unnamed or ambiguous parameter — are
 therefore unit-testable on a bare Python, with no ComfyUI installed.
 """
 
+import contextlib
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import shutil
 import stat
+import uuid
+from collections import namedtuple
+from fractions import Fraction
 
 # Containers that carry Gaussian Splat / point-cloud attributes rather than
 # triangle geometry. Round-tripping one of these through a mesh serializer
@@ -84,6 +89,168 @@ def copy_file_verbatim(src_path, dest_path):
         os.makedirs(parent, exist_ok=True)
     shutil.copy2(src_path, dest_path)
     return dest_path
+
+
+# Where the studio's shared storage is mounted on every GPU machine. An
+# architectural invariant, not an admin setting: this process runs on the GPU
+# machine and cannot read WWAI's settings.
+STORAGE_ROOT = "/storenext/"
+
+_FRAME_TOKEN = re.compile(r"%0([1-9])d")
+
+
+def _refuse_path(class_name, what, path, reason):
+    raise MarkerContractError(f"WWAI_PATH_REFUSED: {class_name}: {what} {path!r} {reason}")
+
+
+def require_storage_path(path, class_name, what):
+    """Return ``path`` unchanged, or refuse the run.
+
+    Nothing is normalised, resolved or stripped: a path that needs tidying is
+    a path someone typed wrong, and tidying it would write somewhere the
+    artist did not name. ``what`` is "source path" or "output path".
+    """
+    if not isinstance(path, str) or not path.strip():
+        _refuse_path(class_name, what, path, "is empty or not text")
+    if "\\" in path or "\x00" in path:
+        _refuse_path(class_name, what, path, "contains a backslash or NUL character")
+    if not path.startswith("/"):
+        _refuse_path(class_name, what, path, "is not an absolute path")
+    if not path.startswith(STORAGE_ROOT):
+        _refuse_path(class_name, what, path, f"is outside {STORAGE_ROOT}")
+    segments = path.split("/")[1:]
+    if any(segment == "" for segment in segments):
+        _refuse_path(class_name, what, path, "has an empty folder name (a doubled or trailing '/')")
+    if any(segment in (".", "..") for segment in segments):
+        _refuse_path(class_name, what, path, "contains a '.' or '..' folder name")
+    return path
+
+
+def frame_pattern(path):
+    """``(directory, prefix, width, suffix)`` for a ``name.%04d.ext`` path, else None.
+
+    The token ``%0Nd`` (N 1-9) may appear once, in the file name only.
+    """
+    directory, _, base = path.rpartition("/")
+    if "%" in directory:
+        _refuse_path("frame_pattern", "path", path, "has a '%' in the folder part")
+    tokens = list(_FRAME_TOKEN.finditer(base))
+    if len(tokens) > 1:
+        _refuse_path("frame_pattern", "path", path, "has more than one frame-number token in the file name")
+    if base.count("%") != len(tokens):
+        # plate.%4d.png would otherwise be read or written as a file literally named that.
+        _refuse_path("frame_pattern", "path", path, "has a '%' that is not a frame-number token such as %04d")
+    if not tokens:
+        return None
+    token = tokens[0]
+    return directory, base[: token.start()], int(token.group(1)), base[token.end() :]
+
+
+def require_folder(directory, class_name):
+    """Refuse the run when ``directory`` does not exist; it is never created."""
+    if not os.path.isdir(directory):
+        raise MarkerContractError(f"WWAI_FOLDER_MISSING: {class_name}: folder {directory!r} does not exist")
+    return directory
+
+
+def _listed_frames(path, class_name):
+    directory, prefix, width, suffix = frame_pattern(path)
+    require_folder(directory, class_name)
+    name = re.compile(re.escape(prefix) + f"([0-9]{{{width}}})" + re.escape(suffix))
+    frames = []
+    for entry in os.listdir(directory):
+        match = name.fullmatch(entry)
+        if match:
+            frames.append((int(match.group(1)), f"{directory}/{entry}"))
+    return sorted(frames)
+
+
+def sequence_frames(path, class_name):
+    """Sorted ``[(frame_number, full_path)]`` of the files a pattern path names.
+
+    Only files with exactly the pattern's digit count match, so ``plate.10000.png``
+    is not frame 10000 of a ``%04d`` sequence. A listing: gaps are not checked here.
+    """
+    if frame_pattern(path) is None:
+        _refuse_path(class_name, "source path", path, "has no frame-number token such as %04d")
+    frames = _listed_frames(path, class_name)
+    if not frames:
+        raise MarkerContractError(f"WWAI_SEQUENCE_EMPTY: {class_name}: no frames match {path!r}")
+    return frames
+
+
+def require_contiguous(frames, path, class_name):
+    """Refuse a sequence with a missing frame number: closing the gap would shift every later frame."""
+    for (number, _), (following, _) in zip(frames, frames[1:]):
+        if following != number + 1:
+            raise MarkerContractError(
+                f"WWAI_SEQUENCE_GAP: {class_name}: frame {number + 1} is missing from {path!r} "
+                f"(frames {number} and {following} are present)"
+            )
+    return frames
+
+
+def refuse_stale_frames(path, first, last, class_name):
+    """Refuse when frames already matching ``path`` lie outside ``first``-``last``.
+
+    Overwriting inside the range is allowed; a returned pattern must never match
+    a frame this run did not write. Nothing is deleted.
+    """
+    stale = [n for n, _ in _listed_frames(path, class_name) if not first <= n <= last]
+    if stale:
+        raise MarkerContractError(
+            f"WWAI_STALE_FRAMES: {class_name}: {len(stale)} frames outside {first}-{last} already match "
+            f"{path!r} (first is {stale[0]}); remove them or choose another output path"
+        )
+
+
+def write_in_place(final_path, write):
+    """Write ``final_path`` through a temp file in its own folder, then rename.
+
+    The reader never sees a half-written file, and ``final_path`` is returned
+    only once the rename has succeeded. Any failure removes the temp file and
+    raises. The folder is never created (a missing one fails loud), and an
+    existing file is overwritten: the artist owns the output path.
+    """
+    write_all_in_place([(final_path, write)])
+    return final_path
+
+
+def write_all_in_place(items):
+    """``items`` is ``[(final_path, write)]``. Write every temp first, then rename in order.
+
+    A failed temp write removes all temps and replaces nothing. A failed rename
+    removes the remaining temps and says how many files were already replaced; an
+    interrupt (anything not an ``OSError``) removes them and is raised unchanged.
+    """
+    temps = []
+    try:
+        for final_path, write in items:
+            directory, base = os.path.split(final_path)
+            temp_path = os.path.join(directory, f".{base}.wwai-tmp-{uuid.uuid4().hex}")
+            temps.append(temp_path)
+            write(temp_path)
+    except BaseException:
+        _remove_temps(temps)
+        raise
+    for done, ((final_path, _), temp_path) in enumerate(zip(items, temps)):
+        try:
+            os.replace(temp_path, final_path)
+        except BaseException as exc:
+            _remove_temps(temps[done:])
+            if done == 0 or not isinstance(exc, OSError):
+                raise
+            raise MarkerContractError(
+                f"WWAI_PARTIAL_WRITE: {done} of {len(items)} frames were replaced before {final_path!r} "
+                f"failed ({exc}); the folder now mixes new and old frames"
+            ) from exc
+    return [final_path for final_path, _ in items]
+
+
+def _remove_temps(temps):
+    for temp_path in temps:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(temp_path)
 
 
 # Name grammars shared with WWAI's backend (a sibling-checkout test compares
@@ -229,7 +396,9 @@ def staged_file_delete(
     if not isinstance(filename, str) or _DOOR_NAME.fullmatch(filename) is None:
         return answer(400, "refused")
     try:
-        queued = {unannotated(value) for value in queued_input_values()}
+        values = queued_input_values()
+        # A Ripple job names its files inside one string value: count those too.
+        queued = {unannotated(value) for value in values}.union(*map(ripple_manifest_names, values))
     except Exception as exc:  # the host's queue failed: refuse, typed and loud
         return answer(500, "failed", detail=f"cannot read the prompt queue: {exc}")
     if f"wwai/{filename}" in queued:
@@ -283,30 +452,10 @@ def _click_int(value, what, minimum=None):
     return value
 
 
-def split_clicks(text):
-    """Validate a WWAI click state (JSON text) and split it into five outputs.
-
-    Returns (include_points, exclude_points, include_boxes, exclude_boxes,
-    frame): points as JSON text of [{"x","y"}], boxes as lists of
-    {x, y, width, height}, each kind in the artist's order. Same grammar as
-    WWAI's _coerce_clicks, without its item-count cap.
-    """
-    if not isinstance(text, str):
-        raise MarkerContractError(f"{CLICKS_INVALID}: the click state must be text")
-    try:
-        state = json.loads(text)
-    except (ValueError, RecursionError):
-        raise MarkerContractError(f"{CLICKS_INVALID}: the click state is not valid JSON") from None
-    if not isinstance(state, dict) or set(state) != {"source", "frame", "items"}:
-        raise MarkerContractError(
-            f"{CLICKS_INVALID}: the click state must be an object with exactly source, frame and items"
-        )
-    if not isinstance(state["source"], str) or not _HEX64.fullmatch(state["source"]):
-        raise MarkerContractError(f"{CLICKS_INVALID}: source must be 64 lower-case hex characters")
-    frame = _click_int(state["frame"], "frame", 0)
-    items = state["items"]
-    if not isinstance(items, list) or not items:
-        raise MarkerContractError(f"{CLICKS_INVALID}: items must be a non-empty list")
+def split_items(items):
+    """Validate click items; return (include_points, exclude_points, include_boxes,
+    exclude_boxes): points as JSON text of [{"x","y"}], boxes as lists of
+    {x, y, width, height}, each kind in the artist's order."""
     points = {"include": [], "exclude": []}
     boxes = {"include": [], "exclude": []}
     for item in items:
@@ -332,5 +481,278 @@ def split_clicks(text):
         json.dumps(points["exclude"]),
         boxes["include"],
         boxes["exclude"],
-        frame,
     )
+
+
+# --- keyframes --------------------------------------------------------------
+#
+# The keyframes text: {source, keyframes: [{frame, object, items}], range?: {in, out}}.
+# Object 0 is the prompt's layer (its items refine the prompt and may be empty);
+# objects 1..N are clicks only. range is the frames a run outputs, In <= Out;
+# absent, the whole clip. Grammar only: no count limits (WWAI caps size).
+
+Keyframe = namedtuple("Keyframe", "frame object items")
+# One keyframe's share of a layer: output frames first..last take their mask
+# from the track started at key; calls are the (start, end) SAM3_VideoTrack
+# runs, end < start meaning backward over the reversed frames.
+Span = namedtuple("Span", "key items first last calls")
+
+
+def _keyframes_invalid(reason, detail):
+    return MarkerContractError(f"{CLICKS_INVALID}: {reason}: {detail}")
+
+
+def _whole(value, what):
+    try:
+        return _click_int(value, what, 0)
+    except MarkerContractError as exc:
+        raise _keyframes_invalid("malformed", str(exc).split(": ", 1)[1]) from None
+
+
+def parse_keyframes(text):
+    """The keyframes text as ([Keyframe], (in, out) or None). Refuses malformed
+    text, In after Out and two keyframes with the same frame and object."""
+    if not isinstance(text, str):
+        raise _keyframes_invalid("malformed", "the keyframes state must be text")
+    try:
+        state = json.loads(text)
+    except (ValueError, RecursionError):
+        raise _keyframes_invalid("malformed", "the keyframes state is not valid JSON") from None
+    if not isinstance(state, dict) or not {"source", "keyframes"} <= set(state) <= {"source", "keyframes", "range"}:
+        raise _keyframes_invalid("malformed", "the state must have source, keyframes and an optional range")
+    if not isinstance(state["source"], str) or not _HEX64.fullmatch(state["source"]):
+        raise _keyframes_invalid("malformed", "source must be 64 lower-case hex characters")
+    if not isinstance(state["keyframes"], list):
+        raise _keyframes_invalid("malformed", "keyframes must be a list")
+    keyframes, seen = [], set()
+    for entry in state["keyframes"]:
+        if not isinstance(entry, dict) or set(entry) != {"frame", "object", "items"}:
+            raise _keyframes_invalid("malformed", "each keyframe has exactly frame, object and items")
+        frame, obj = _whole(entry["frame"], "frame"), _whole(entry["object"], "object")
+        if not isinstance(entry["items"], list):
+            raise _keyframes_invalid("malformed", "items must be a list")
+        try:
+            split_items(entry["items"])
+        except MarkerContractError as exc:
+            raise _keyframes_invalid("malformed", str(exc).split(": ", 1)[1]) from None
+        if any(item["kind"] == "box" and item["mode"] == "exclude" for item in entry["items"]):
+            # SAM3_Detect takes no exclude box; refuse rather than drop it.
+            raise _keyframes_invalid("exclude_box_unsupported", f"object {obj} at frame {frame} has an exclude box")
+        if (frame, obj) in seen:
+            raise _keyframes_invalid("repeated_keyframe", f"object {obj} has two keyframes at frame {frame}")
+        seen.add((frame, obj))
+        keyframes.append(Keyframe(frame, obj, entry["items"]))
+    frame_range = None
+    if "range" in state:
+        rng = state["range"]
+        if not isinstance(rng, dict) or set(rng) != {"in", "out"}:
+            raise _keyframes_invalid("malformed", "range has exactly in and out")
+        frame_range = (_whole(rng["in"], "In"), _whole(rng["out"], "Out"))
+        if frame_range[0] > frame_range[1]:
+            raise _keyframes_invalid("in_after_out", f"In {frame_range[0]} is after Out {frame_range[1]}")
+    return keyframes, frame_range
+
+
+# The Ripple job text a WWAIExposeRippleJob reads (WWAI HRP4 schema v2: the ORIGINAL
+# movie, its time base, the window on its 24 fps grid, the size to decode at, and each
+# edit's window frame and pts). The resize methods and bounds are From Frames' own
+# (WepeNerd ripple_core.py / ripple_node.py); a value outside them is refused here,
+# never clamped.
+RIPPLE_JOB_INVALID = "WWAI_RIPPLE_JOB_INVALID"
+RIPPLE_MAX_TEXT_BYTES = 16 * 1024
+RIPPLE_MAX_EDITS = 32
+RIPPLE_RESIZE_METHODS = ("lanczos", "bicubic", "bilinear", "nearest-exact", "area")
+RIPPLE_GRID_FPS = 24
+_RIPPLE_KEYS = {
+    "version", "video", "time_base", "window_start", "length", "decode_width", "decode_height",
+    "megapixels", "allow_upscale", "resize_method", "output_width", "output_height", "markers",
+}
+_TIME_BASE = re.compile(r"[1-9][0-9]*/[1-9][0-9]*")
+
+
+def _ripple_invalid(detail):
+    return MarkerContractError(f"{RIPPLE_JOB_INVALID}: {detail}")
+
+
+def _ripple_int(value, what, low, high):
+    if not isinstance(value, int) or isinstance(value, bool) or not low <= value <= high:
+        raise _ripple_invalid(f"{what} must be a whole number from {low} to {high}")
+    return value
+
+
+def parse_ripple_manifest(text):
+    """The Ripple job text as a dict (schema v2, WWAI plan 2418 HRP4). Refuses text over
+    16 KiB before parsing, then anything outside the schema; nothing is clamped. A
+    version 1 job (a WWAI-cut clip) is refused like any other: the clip path is gone."""
+    if not isinstance(text, str):
+        raise _ripple_invalid("the job must be text")
+    if len(text.encode("utf-8")) > RIPPLE_MAX_TEXT_BYTES:
+        raise _ripple_invalid(f"the job text is over {RIPPLE_MAX_TEXT_BYTES} bytes")
+    try:
+        job = json.loads(text)
+    except (ValueError, RecursionError):
+        raise _ripple_invalid("the job is not valid JSON") from None
+    if not isinstance(job, dict) or set(job) != _RIPPLE_KEYS:
+        raise _ripple_invalid("the job must have exactly " + ", ".join(sorted(_RIPPLE_KEYS)))
+    if job["version"] != 2 or isinstance(job["version"], bool):
+        raise _ripple_invalid("version must be 2")
+    if not is_staged_name(job["video"]):
+        raise _ripple_invalid("video must be a staged file name")
+    if not isinstance(job["time_base"], str) or not _TIME_BASE.fullmatch(job["time_base"]):
+        raise _ripple_invalid('time_base must be "n/d" with whole numbers above 0')
+    # From Frames' own window_start bound (ripple_node.py: io.Int.Input max).
+    _ripple_int(job["window_start"], "window_start", 0, 10_000_000)
+    length = _ripple_int(job["length"], "length", 5, 3592)
+    if (length - 5) % 17:
+        raise _ripple_invalid("length must be 17k + 5 frames")
+    _ripple_int(job["decode_width"], "decode_width", 1, 16384)
+    _ripple_int(job["decode_height"], "decode_height", 1, 16384)
+    megapixels = job["megapixels"]
+    if isinstance(megapixels, bool) or not isinstance(megapixels, (int, float)) or not 0.001 <= megapixels <= 268.435456:
+        raise _ripple_invalid("megapixels must be a number from 0.001 to 268.435456")
+    if not isinstance(job["allow_upscale"], bool):
+        raise _ripple_invalid("allow_upscale must be true or false")
+    if job["resize_method"] not in RIPPLE_RESIZE_METHODS:
+        raise _ripple_invalid("resize_method must be one of " + ", ".join(RIPPLE_RESIZE_METHODS))
+    width = _ripple_int(job["output_width"], "output_width", 0, 16384)
+    height = _ripple_int(job["output_height"], "output_height", 0, 16384)
+    if (width == 0) != (height == 0):
+        raise _ripple_invalid("output_width and output_height must both be set or both be 0")
+    markers = job["markers"]
+    if not isinstance(markers, list) or not 1 <= len(markers) <= RIPPLE_MAX_EDITS:
+        raise _ripple_invalid(f"markers must be a list of 1 to {RIPPLE_MAX_EDITS} edits")
+    frames, stamps = set(), set()
+    for marker in markers:
+        if not isinstance(marker, dict) or set(marker) != {"frame", "pts", "edited"}:
+            raise _ripple_invalid("each marker has exactly frame, pts and edited")
+        frame = _ripple_int(marker["frame"], "frame", 0, length - 1)
+        if frame in frames:
+            raise _ripple_invalid(f"two edits are for frame {frame}")
+        frames.add(frame)
+        pts = marker["pts"]
+        if not isinstance(pts, int) or isinstance(pts, bool):
+            raise _ripple_invalid("pts must be a whole number")
+        if pts in stamps:
+            raise _ripple_invalid(f"two edits are for pts {pts}")
+        stamps.add(pts)
+        if not is_staged_name(marker["edited"]):
+            raise _ripple_invalid("edited must be a staged file name")
+    return job
+
+
+# The frame rule (WWAI plan 2419 HRP0), the same one WWAI's backend/core/ripple_job.py
+# runs; ripple_cases.json (byte-identical to WWAI's fixtures/comfyui_ripple_cases.json)
+# pins both. Units: pts, next_pts and p0 are ticks of the stream's time base; p0 is the
+# first DECODED frame's pts. Grid frame k shows the source frame playing from pts to
+# next_pts iff (pts - p0)*tb*24 < k + 1/2 <= (next_pts - p0)*tb*24, smallest such k.
+RIPPLE_VIDEO_UNUSABLE = "WWAI_RIPPLE_VIDEO_UNUSABLE"
+_HALF = Fraction(1, 2)
+
+
+def ripple_grid_frame(pts, next_pts, p0, time_base):
+    """The first grid frame that shows the source frame playing from *pts* to *next_pts*,
+    or None when none does (a 30 fps frame the 24 fps grid skips, or one before p0)."""
+    rate = time_base * RIPPLE_GRID_FPS
+    k = math.floor((pts - p0) * rate - _HALF) + 1
+    return k if k >= 0 and k + _HALF <= (next_pts - p0) * rate else None
+
+
+def ripple_grid_count(end_pts, p0, time_base):
+    """How many grid frames a shot has whose last frame ends at *end_pts*."""
+    return max(0, math.floor((end_pts - p0) * time_base * RIPPLE_GRID_FPS - _HALF) + 1)
+
+
+def ripple_grid_slots(pts, p0, end_pts, time_base):
+    """The source pts every grid frame of the shot shows, in grid order (a frame shown
+    twice appears twice). *pts* are the played frames' stamps in any order, *end_pts*
+    where the last one stops. Refuses stamps the rule cannot place one way."""
+    ordered = sorted(pts)
+    if len(set(ordered)) != len(ordered):
+        raise MarkerContractError(f"{RIPPLE_VIDEO_UNUSABLE}: two frames of the movie share one time stamp")
+    if not ordered or end_pts <= ordered[-1]:
+        raise MarkerContractError(f"{RIPPLE_VIDEO_UNUSABLE}: the movie's last frame has no length")
+    if p0 not in ordered:
+        raise MarkerContractError(f"{RIPPLE_VIDEO_UNUSABLE}: the first decoded frame has no packet")
+    rate = time_base * RIPPLE_GRID_FPS
+    slots = []
+    for p, next_pts in zip(ordered, ordered[1:] + [end_pts]):
+        while len(slots) + _HALF <= (next_pts - p0) * rate:
+            slots.append(p)
+    return slots
+
+
+def ripple_manifest_names(text):
+    """The staged names a queued value holds if it is a Ripple job, else an empty set."""
+    try:
+        job = parse_ripple_manifest(text)
+    except MarkerContractError:
+        return set()
+    return {job["video"], *(marker["edited"] for marker in job["markers"])}
+
+
+def check_keyframes(parsed, frame_count, prompt_set):
+    """Refuse what parsed keyframes cannot mean on a clip of frame_count frames
+    (a picture: 1) with the prompt set or blank; return (first, last) output frames."""
+    keyframes, frame_range = parsed
+    if frame_count < 1:
+        raise _keyframes_invalid("empty_clip", "the picture or movie has no frames")
+    for kf in keyframes:
+        if kf.frame >= frame_count:
+            if frame_count == 1:
+                raise _keyframes_invalid("picture_frame_not_zero", f"a picture has only frame 0, not {kf.frame}")
+            raise _keyframes_invalid("frame_outside_clip", f"frame {kf.frame} is past the last frame {frame_count - 1}")
+        if kf.object == 0 and not prompt_set:
+            raise _keyframes_invalid("prompt_keyframe_without_prompt", f"object 0 at frame {kf.frame} refines a prompt, and the prompt is blank")
+        if kf.object > 0 and not kf.items:
+            raise _keyframes_invalid("click_object_without_clicks", f"object {kf.object} at frame {kf.frame} has no clicks")
+    if not prompt_set and not keyframes:
+        raise _keyframes_invalid("nothing_to_track", "there is no prompt and no click")
+    if frame_range is None:
+        return 0, frame_count - 1
+    if frame_range[1] >= frame_count:
+        raise _keyframes_invalid("range_outside_clip", f"Out {frame_range[1]} is past the last frame {frame_count - 1}")
+    return frame_range
+
+
+def track_calls(key, first, last):
+    """The SAM3_VideoTrack runs that give frames first..last from a track keyed
+    at key: forward over key..last when last > key, backward over key..first
+    when first < key, one one-frame run when first == last == key."""
+    calls = []
+    if last > key:
+        calls.append((key, last))
+    if first < key:
+        calls.append((key, first))
+    return tuple(calls) or ((key, key),)
+
+
+def _spans(keys, first, last):
+    """Each output frame takes its nearest key (a tie goes to the earlier one);
+    a key that no output frame takes gets no span."""
+    keys = sorted(keys, key=lambda kf: kf[0])
+    owned = {}
+    for frame in range(first, last + 1):
+        best = min(keys, key=lambda kf: (abs(frame - kf[0]), kf[0]))
+        owned.setdefault(best[0], [best[1], frame, frame])[2] = frame
+    return [Span(key, items, lo, hi, track_calls(key, lo, hi)) for key, (items, lo, hi) in sorted(owned.items())]
+
+
+def plan_tracking(text, frame_count, prompt_set):
+    """((first, last), [(object, [Span])]): the layers a run tracks, object 0
+    (the prompt) first when the prompt is set. A prompt with no object-0
+    keyframe is keyed at frame 0 with no clicks (items None)."""
+    parsed = parse_keyframes(text)
+    first, last = check_keyframes(parsed, frame_count, prompt_set)
+    by_object = {}
+    for kf in parsed[0]:
+        by_object.setdefault(kf.object, []).append((kf.frame, kf.items))
+    if prompt_set:
+        by_object.setdefault(0, [(0, None)])
+    layers = [(obj, _spans(keys, first, last)) for obj, keys in sorted(by_object.items())]
+    return (first, last), layers
+
+
+def tracked_frames(text, frame_count, prompt_set):
+    """Frames SAM3_VideoTrack steps through, summed over every run of every layer."""
+    _, layers = plan_tracking(text, frame_count, prompt_set)
+    return sum(abs(end - start) + 1 for _, spans in layers for span in spans for start, end in span.calls)

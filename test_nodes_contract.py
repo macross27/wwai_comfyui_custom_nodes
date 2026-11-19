@@ -17,8 +17,12 @@ Real-ComfyUI verification is still required for registration and socket
 compatibility; this is the regression net underneath it.
 """
 
+import hashlib
 import inspect
+import itertools
+import json
 import os
+import pathlib
 import shutil
 import sys
 import tempfile
@@ -26,6 +30,7 @@ import types
 import unittest
 from enum import Enum
 from fractions import Fraction
+from unittest import mock
 
 import av
 import numpy as np
@@ -55,12 +60,33 @@ class _Tensor(np.ndarray):
     def clamp(self, lo, hi):
         return _Tensor(np.clip(self, lo, hi))
 
+    def numel(self):
+        return self.size
+
+    @property
+    def _version(self):
+        # ComfyUI runs every node under torch.inference_mode(), and an inference
+        # tensor has no in-place counter: reading it raises this, as real torch does.
+        raise RuntimeError("Inference tensors do not track version counter.")
+
+    def clone(self):
+        return _Tensor(np.array(self))
+
+    def untyped_storage(self):
+        owner = self
+        while isinstance(owner.base, np.ndarray):
+            owner = owner.base
+        return types.SimpleNamespace(nbytes=lambda: owner.nbytes)
+
 
 def _torch_stub():
     mod = types.ModuleType("torch")
     mod.float32 = np.float32
     mod.from_numpy = _Tensor
     mod.zeros = lambda shape, dtype=None: _Tensor(np.zeros(shape, dtype=dtype or np.float32))
+    mod.flip = lambda tensor, dims: _Tensor(np.flip(tensor, axis=dims))
+    mod.maximum = lambda a, b: _Tensor(np.maximum(a, b))
+    mod.stack = lambda tensors, dim=0: _Tensor(np.stack(tensors, axis=dim))
     return mod
 
 
@@ -228,6 +254,73 @@ def _save_3d_stub():
     return parent, mod
 
 
+class _Sam3:
+    """Stand-in for comfy_extras.nodes_sam3 (ComfyUI b53f77a7), recording every call.
+
+    A frame's pixels hold its clip index, so each call knows which frames it got.
+    Detect paints each include point with (keyframe index + 1); a track hands its
+    initial mask to every frame unless a test sets `track`.
+    """
+
+    calls = []
+    track = None  # (clip frame, track_data) -> (H, W) mask
+
+    @staticmethod
+    def frames(images):
+        return [int(images[i, 0, 0, 0]) for i in range(images.shape[0])]
+
+
+def _sam3_stub():
+    import json
+
+    def node(name, body):
+        @classmethod
+        def execute(cls, **kwargs):
+            _Sam3.calls.append((name, kwargs))
+            return types.SimpleNamespace(args=body(**kwargs))
+
+        return type(name, (), {"execute": execute})
+
+    def detect(model, image, conditioning=None, bboxes=None, positive_coords=None,
+               negative_coords=None, threshold=0.5, refine_iterations=2, individual_masks=False):
+        (frame,) = _Sam3.frames(image)
+        mask = np.zeros((1,) + image.shape[1:3], dtype=np.float32)
+        for point in json.loads(positive_coords or "[]"):
+            mask[0, point["y"], point["x"]] = frame + 1
+        return (_Tensor(mask), [])
+
+    def video_track(images, model, initial_mask=None, conditioning=None,
+                    detection_threshold=0.5, max_objects=0, detect_interval=1):
+        return ({"frames": _Sam3.frames(images), "init": initial_mask, "cond": conditioning,
+                 "size": images.shape[1:3]},)
+
+    def track_to_mask(track_data, object_indices=""):
+        def default(frame, data):
+            return data["init"][0] if data["init"] is not None else np.zeros(data["size"], np.float32)
+
+        rule = _Sam3.track or default
+        return (_Tensor(np.stack([rule(f, track_data) for f in track_data["frames"]])),)
+
+    mod = types.ModuleType("comfy_extras.nodes_sam3")
+    mod.SAM3_Detect = node("SAM3_Detect", detect)
+    mod.SAM3_VideoTrack = node("SAM3_VideoTrack", video_track)
+    mod.SAM3_TrackToMask = node("SAM3_TrackToMask", track_to_mask)
+    return mod
+
+
+def _comfy_nodes_stub():
+    """ComfyUI's top-level `nodes` module: only CLIPTextEncode is used."""
+
+    class CLIPTextEncode:
+        def encode(self, clip, text):
+            _Sam3.calls.append(("CLIPTextEncode", {"clip": clip, "text": text}))
+            return ([["cond", {"text": text}]],)
+
+    mod = types.ModuleType("nodes")
+    mod.CLIPTextEncode = CLIPTextEncode
+    return mod
+
+
 class _Routes:
     def __init__(self):
         self.handlers = {}
@@ -279,6 +372,8 @@ def setUpModule():
 
     comfy_api, comfy_api_latest = _comfy_api_stub()
     comfy_extras, save_3d = _save_3d_stub()
+    sam3 = _sam3_stub()
+    comfy_extras.nodes_sam3 = sam3
     aiohttp, aiohttp_web = _aiohttp_stub()
     stubs = {
         "server": _server_stub(),
@@ -291,6 +386,8 @@ def setUpModule():
         "comfy_api.latest": comfy_api_latest,
         "comfy_extras": comfy_extras,
         "comfy_extras.nodes_save_3d": save_3d,
+        "comfy_extras.nodes_sam3": sam3,
+        "nodes": _comfy_nodes_stub(),
     }
     for name, module in stubs.items():
         _REAL_MODULES[name] = sys.modules.get(name)
@@ -306,12 +403,26 @@ def setUpModule():
     ).MarkerContractError
 
     Image.new("RGBA", (8, 6), (10, 20, 30, 255)).save(os.path.join(_IN, "shot.png"))
-    with open(os.path.join(_IN, "clip.mp4"), "wb") as handle:
-        handle.write(b"fake")
+    _tiny_movie(os.path.join(_IN, "clip.mp4"))
+    shutil.copy(os.path.join(_IN, "clip.mp4"), os.path.join(_IN, "clip.mxf"))
     with open(os.path.join(_IN, "track.flac"), "wb") as handle:
         handle.write(b"fLaC")
     with open(os.path.join(_IN, "splat.ply"), "wb") as handle:
         handle.write(_splat_ply())
+
+
+def _tiny_movie(path, rate=24, frames=2):
+    """A real movie (two frames unless told), so the frame-rate check reads a real file."""
+    with av.open(path, "w", format="mp4") as container:
+        stream = container.add_stream("mpeg4", rate=rate)
+        stream.width = stream.height = 16
+        stream.pix_fmt = "yuv420p"
+        for _ in range(frames):
+            frame = av.VideoFrame.from_ndarray(np.zeros((16, 16, 3), np.uint8), format="rgb24")
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
 
 
 def tearDownModule():
@@ -337,18 +448,20 @@ def _written(entry):
 
 
 ALL_NODES = {
-    "WWAIExposeText", "WWAIExposeClicks", "WWAIExposeInt", "WWAIExposeFloat", "WWAIExposeBool", "WWAIExposeCombo", "WWAIExposeImage",
-    "WWAIExposeAudio", "WWAIExposeVideo", "WWAIExposeMesh",
+    "WWAIExposeText", "WWAIExposeInt", "WWAIExposeFloat", "WWAIExposeBool", "WWAIExposeCombo", "WWAIExposeImage",
+    "WWAIExposeAudio", "WWAIExposeVideo", "WWAIExposeMesh", "WWAIExposeRippleJob",
     "WWAIExposeOutputImage", "WWAIExposeOutputAudio",
     "WWAIExposeOutputVideo", "WWAIExposeOutputMesh",
     "WWAIRefuseBlankMask",
+    "WWAIExposeKeyframes", "WWAIExposeImageOrVideo", "WWAIExposeOutputImageOrVideo", "WWAIRotoTrack",
+    "WWAIExposeOutputText", "WWAILoadFromPath", "WWAISaveToPath",
 }
 # Utility nodes WWAI does not treat as markers (no WWAIExpose prefix): they
 # carry no name/description/required widgets.
-NON_MARKER_NODES = {"WWAIRefuseBlankMask"}
+NON_MARKER_NODES = {"WWAIRefuseBlankMask", "WWAIRotoTrack", "WWAILoadFromPath", "WWAISaveToPath"}
 OUTPUT_NODES = {
     "WWAIExposeOutputImage", "WWAIExposeOutputAudio",
-    "WWAIExposeOutputVideo", "WWAIExposeOutputMesh",
+    "WWAIExposeOutputVideo", "WWAIExposeOutputMesh", "WWAIExposeOutputImageOrVideo", "WWAIExposeOutputText",
 }
 
 
@@ -357,14 +470,6 @@ def _audio(channels=2, batch=1):
 
 
 class RegistrationTest(unittest.TestCase):
-    def test_clicks_node_shape(self):
-        value = nodes.WWAIExposeClicks.INPUT_TYPES()["required"]["value"]
-        self.assertEqual(value[0], "STRING")
-        self.assertEqual(value[1]["default"], "")
-        self.assertEqual(
-            nodes.WWAIExposeClicks.RETURN_TYPES, ("STRING", "STRING", "BOUNDING_BOX", "BOUNDING_BOX", "INT")
-        )
-
     def test_every_node_registers_with_a_display_name(self):
         self.assertEqual(set(nodes.NODE_CLASS_MAPPINGS), ALL_NODES)
         self.assertEqual(set(nodes.NODE_DISPLAY_NAME_MAPPINGS), ALL_NODES)
@@ -384,9 +489,14 @@ class RegistrationTest(unittest.TestCase):
             self.assertIs(widget[1]["default"], True, name)
 
     def test_non_markers_do_not_use_the_marker_prefix(self):
+        display = {
+            "WWAIRefuseBlankMask": "WWAI Refuse Blank Mask", "WWAIRotoTrack": "WWAI Roto Track",
+            "WWAILoadFromPath": "WWAI Load From Path", "WWAISaveToPath": "WWAI Save To Path",
+        }
+        self.assertEqual(set(display), NON_MARKER_NODES)
         for name in NON_MARKER_NODES:
             self.assertFalse(name.startswith("WWAIExpose"), name)
-            self.assertEqual(nodes.NODE_DISPLAY_NAME_MAPPINGS[name], "WWAI Refuse Blank Mask")
+            self.assertEqual(nodes.NODE_DISPLAY_NAME_MAPPINGS[name], display[name])
 
     def test_no_output_marker_declares_a_required_toggle(self):
         for name in OUTPUT_NODES:
@@ -462,6 +572,25 @@ class SocketTypeTest(unittest.TestCase):
 
     def test_mesh_input_emits_what_load3d_emits(self):
         self.assertEqual(nodes.WWAIExposeMesh.RETURN_TYPES, ("FILE_3D",))
+
+    def test_path_nodes_sockets(self):
+        load, save, text = nodes.WWAILoadFromPath, nodes.WWAISaveToPath, nodes.WWAIExposeOutputText
+        self.assertEqual(load.RETURN_TYPES, ("IMAGE", "INT", "FLOAT"))
+        self.assertEqual(load.RETURN_NAMES, ("images", "first_frame", "fps"))
+        self.assertEqual(set(load.INPUT_TYPES()["required"]), {"path"})
+        required = save.INPUT_TYPES()["required"]
+        self.assertEqual(set(required), {"images", "path", "first_frame", "bit_depth"})
+        self.assertEqual(required["images"][0], "IMAGE")
+        self.assertEqual(required["first_frame"][1], {"default": 1, "min": 0, "max": 9999999})
+        self.assertEqual(required["bit_depth"][0], ["16-bit", "8-bit"])
+        self.assertEqual(required["bit_depth"][1]["default"], "16-bit")
+        self.assertEqual((save.RETURN_TYPES, save.RETURN_NAMES), (("STRING",), ("path",)))
+        self.assertFalse(getattr(save, "OUTPUT_NODE", False))
+        self.assertEqual(text.RETURN_TYPES, ())
+        self.assertEqual(text.INPUT_TYPES()["required"]["value"], ("STRING", {"forceInput": True}))
+        for cls in (load, save):
+            self.assertEqual(cls.CATEGORY, "WWAI/Utility")
+        self.assertEqual(text.CATEGORY, "WWAI/Expose Output")
 
     def test_mesh_output_accepts_every_3d_type_comfyui_has(self):
         # ComfyUI matches sockets by exact string and has fourteen 3D types.
@@ -746,11 +875,195 @@ class OutputMarkerTest(unittest.TestCase):
             ("WWAIExposeOutputAudio", {"value": _audio(), "format": "flac"}),
             ("WWAIExposeOutputVideo", {"video": _VideoFromFile(os.path.join(_IN, "clip.mp4"))}),
             ("WWAIExposeOutputMesh", {"value": _File3D(os.path.join(_IN, "splat.ply"))}),
+            ("WWAIExposeOutputText", {"value": "/storenext/a.png"}),
         ]
         for name, kwargs in cases:
             with self.assertRaises(MarkerContractError, msg=name):
                 nodes.NODE_CLASS_MAPPINGS[name]().expose(name="", description="", **kwargs)
 
+
+
+def _png_encoder_stub(calls):
+    """Stands in for core's _encode_image: a real PNG of the float image."""
+    import io
+
+    def encode(image, format, bit_depth, input_color_space):
+        calls.append((format, bit_depth, input_color_space))
+        array = np.clip(255.0 * np.asarray(image), 0, 255).astype(np.uint8)
+        buffer = io.BytesIO()
+        Image.fromarray(array).save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    return encode
+
+
+class PathNodesTest(unittest.TestCase):
+    """Plan 2458: read and write studio storage by path. The storage root is
+    pointed at a temp folder so no test ever touches the real /storenext/."""
+
+    def setUp(self):
+        import importlib
+
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        os.makedirs(os.path.join(self.root, "show"))
+        core = importlib.import_module(nodes.__package__ + ".wwai_markers_core")
+        self.calls = []
+        for patcher in (
+            mock.patch.object(core, "STORAGE_ROOT", self.root + "/"),
+            mock.patch.object(nodes, "_encode_image", _png_encoder_stub(self.calls)),
+            mock.patch.object(nodes, "IMAGE_ENCODER_IMPORT_ERROR", None),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.pattern = f"{self.root}/show/matte.%04d.png"
+
+    def batch(self, count=2):
+        arr = np.zeros((count, 4, 6, 3), dtype=np.float32)
+        for i in range(count):
+            arr[i] = (i + 1) / 10.0
+        return _Tensor(arr)
+
+    def test_sequence_round_trip(self):
+        (path,) = nodes.WWAISaveToPath().expose(self.batch(), self.pattern, 1001, "16-bit")
+        self.assertEqual(path, self.pattern)
+        self.assertEqual(self.calls, [("png", "16-bit", "sRGB")] * 2)
+        self.assertEqual(sorted(os.listdir(f"{self.root}/show")), ["matte.1001.png", "matte.1002.png"])
+        for name in ("matte.1001.png", "matte.1002.png"):
+            with Image.open(f"{self.root}/show/{name}") as img:
+                self.assertEqual(img.size, (6, 4))
+        images, first_frame, fps = nodes.WWAILoadFromPath().expose(self.pattern)
+        self.assertEqual((images.shape, first_frame, fps), ((2, 4, 6, 3), 1001, 0.0))
+        np.testing.assert_allclose(np.asarray(images)[1], 0.2, atol=1 / 255)
+
+    def test_a_single_file_is_written_and_overwritten(self):
+        target = f"{self.root}/show/one.png"
+        nodes.WWAISaveToPath().expose(self.batch(1), target, 1, "8-bit")
+        self.assertEqual(self.calls[-1][1], "8-bit")
+        self.assertEqual(nodes.WWAISaveToPath().expose(self.batch(1), target, 1, "8-bit"), (target,))
+        self.assertEqual(os.listdir(f"{self.root}/show"), ["one.png"])
+        with self.assertRaises(MarkerContractError):
+            nodes.WWAISaveToPath().expose(self.batch(2), target, 1, "8-bit")
+
+    def test_refused_output_paths_write_nothing(self):
+        for path in (
+            f"{self.root}/show/../matte.%04d.png", "/opt/matte.%04d.png", f"{self.root}/show/matte.%04d.exr",
+            f"{self.root}/show/matte.%04d.%04d.png", f"{self.root}/show//matte.png",
+        ):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(MarkerContractError, "^WWAI_PATH_REFUSED: "):
+                    nodes.WWAISaveToPath().expose(self.batch(), path, 1, "16-bit")
+        self.assertEqual(os.listdir(f"{self.root}/show"), [])
+        self.assertEqual(os.listdir(self.root), ["show"])
+
+    def test_a_frame_number_too_wide_for_the_pattern_is_refused_before_any_write(self):
+        with self.assertRaisesRegex(MarkerContractError, "^WWAI_PATH_REFUSED: "):
+            nodes.WWAISaveToPath().expose(self.batch(), self.pattern, 9999, "16-bit")
+        self.assertEqual(os.listdir(f"{self.root}/show"), [])
+
+    def test_no_path_is_returned_when_a_frame_fails_to_write(self):
+        with mock.patch.object(nodes, "_encode_image", side_effect=ValueError("bad pixels")):
+            with self.assertRaisesRegex(ValueError, "bad pixels"):
+                nodes.WWAISaveToPath().expose(self.batch(), self.pattern, 1, "16-bit")
+        self.assertEqual(os.listdir(f"{self.root}/show"), [])
+
+    def test_missing_encoder_is_a_named_runtime_error(self):
+        with mock.patch.object(nodes, "IMAGE_ENCODER_IMPORT_ERROR", ImportError("no nodes_images")):
+            with self.assertRaisesRegex(RuntimeError, "no nodes_images"):
+                nodes.WWAISaveToPath().expose(self.batch(), self.pattern, 1, "16-bit")
+
+    def test_save_always_reruns(self):
+        import math
+
+        self.assertTrue(math.isnan(nodes.WWAISaveToPath.IS_CHANGED(images=None, path="x", first_frame=1, bit_depth="8-bit")))
+
+    def test_load_refusals(self):
+        load = nodes.WWAILoadFromPath()
+        for path, token in (
+            ("/opt/x.%04d.png", "WWAI_PATH_REFUSED"),
+            (f"{self.root}/show/x.%04d.jpg", "WWAI_PATH_REFUSED"),
+            (f"{self.root}/show/x.%04d.png", "WWAI_SEQUENCE_EMPTY"),
+        ):
+            with self.subTest(path=path):
+                with self.assertRaisesRegex(MarkerContractError, "^" + token):
+                    load.expose(path)
+
+    def test_load_refuses_a_sequence_with_a_missing_frame(self):
+        for n in (1001, 1002, 1004):
+            Image.new("RGB", (6, 4)).save(f"{self.root}/show/g.{n}.png")
+        with self.assertRaisesRegex(MarkerContractError, "^WWAI_SEQUENCE_GAP: .*frame 1003 is missing"):
+            nodes.WWAILoadFromPath().expose(f"{self.root}/show/g.%04d.png")
+
+    def test_save_refuses_old_frames_outside_the_new_range_and_keeps_them(self):
+        nodes.WWAISaveToPath().expose(self.batch(), self.pattern, 1001, "16-bit")
+        before = sorted(os.listdir(f"{self.root}/show"))
+        with self.assertRaisesRegex(MarkerContractError, "^WWAI_STALE_FRAMES: .*first is 1002"):
+            nodes.WWAISaveToPath().expose(self.batch(1), self.pattern, 1001, "16-bit")
+        self.assertEqual(sorted(os.listdir(f"{self.root}/show")), before)
+
+    def test_a_missing_folder_is_named_before_anything_is_written(self):
+        gone = f"{self.root}/show/gone"
+        for node, path in (
+            (nodes.WWAILoadFromPath, f"{gone}/x.%04d.png"),
+            (nodes.WWAISaveToPath, f"{gone}/x.%04d.png"),
+            (nodes.WWAISaveToPath, f"{gone}/one.png"),
+        ):
+            with self.subTest(node=node.__name__, path=path):
+                with self.assertRaises(MarkerContractError) as caught:
+                    if node is nodes.WWAILoadFromPath:
+                        node().expose(path)
+                    else:
+                        node().expose(self.batch(1), path, 1, "8-bit")
+                self.assertEqual(
+                    str(caught.exception),
+                    f"WWAI_FOLDER_MISSING: {node.__name__}: folder {gone!r} does not exist",
+                )
+        self.assertEqual(self.calls, [])
+        self.assertEqual(os.listdir(f"{self.root}/show"), [])
+
+    def test_load_refuses_frames_of_different_size(self):
+        Image.new("RGB", (6, 4)).save(f"{self.root}/show/m.0001.png")
+        Image.new("RGB", (8, 4)).save(f"{self.root}/show/m.0002.png")
+        with self.assertRaisesRegex(MarkerContractError, "^WWAI_SEQUENCE_MISMATCH: "):
+            nodes.WWAILoadFromPath().expose(f"{self.root}/show/m.%04d.png")
+
+    def test_load_reads_a_movie_with_its_frame_rate(self):
+        _tiny_movie(f"{self.root}/show/clip.mp4", rate=24, frames=3)
+        images, first_frame, fps = nodes.WWAILoadFromPath().expose(f"{self.root}/show/clip.mp4")
+        self.assertEqual((images.shape, first_frame, fps), ((3, 16, 16, 3), 1, 24.0))
+        self.assertIsInstance(fps, float)
+
+    def test_load_refuses_an_unreadable_movie(self):
+        with open(f"{self.root}/show/bad.mp4", "wb") as handle:
+            handle.write(b"not a movie")
+        with self.assertRaisesRegex(MarkerContractError, "^WWAI_VIDEO_UNREADABLE: "):
+            nodes.WWAILoadFromPath().expose(f"{self.root}/show/bad.mp4")
+        with self.assertRaisesRegex(MarkerContractError, "^WWAI_VIDEO_UNREADABLE: "):
+            nodes.WWAILoadFromPath().expose(f"{self.root}/show/missing.mp4")
+
+    def test_load_is_cached_by_file_state_and_runs_when_the_path_is_unusable(self):
+        import math
+
+        changed = nodes.WWAILoadFromPath.IS_CHANGED
+        nodes.WWAISaveToPath().expose(self.batch(), self.pattern, 1001, "16-bit")
+        first = changed(self.pattern)
+        self.assertEqual(first, changed(self.pattern))
+        self.assertEqual(first[0], self.pattern)
+        os.utime(f"{self.root}/show/matte.1002.png", (1, 1))
+        self.assertNotEqual(first, changed(self.pattern))
+        for path in ("/opt/x.png", f"{self.root}/show/none.%04d.png", f"{self.root}/show/none.mp4"):
+            self.assertTrue(math.isnan(changed(path)), path)
+
+    def test_output_text_returns_the_one_shape_wwai_reads(self):
+        text = nodes.WWAIExposeOutputText()
+        self.assertEqual(
+            text.expose(self.pattern, "written", ""), {"ui": {"wwai_result": [{"text": self.pattern}]}}
+        )
+        for bad in ("", None, 3):
+            with self.assertRaises(MarkerContractError):
+                text.expose(bad, "written", "")
+        with self.assertRaises(MarkerContractError):
+            text.expose(self.pattern, " ", "")
 
 
 class RefuseBlankMaskTest(unittest.TestCase):
@@ -764,10 +1077,25 @@ class RefuseBlankMaskTest(unittest.TestCase):
         frames = _Tensor(np.zeros((2, 4, 4, 3), dtype=np.float32))
         with self.assertRaises(MarkerContractError) as caught:
             nodes.WWAIRefuseBlankMask().expose(frames)
-        self.assertEqual(
-            str(caught.exception),
-            "WWAI_NOTHING_FOUND: The prompt found nothing in this file. Try other words.",
-        )
+        self.assertEqual(str(caught.exception), NOTHING_FOUND)
+
+    def test_an_empty_batch_is_nothing_found_not_a_max_error(self):
+        frames = _Tensor(np.zeros((0, 4, 4, 3), dtype=np.float32))
+        with self.assertRaises(MarkerContractError) as caught:
+            nodes.WWAIRefuseBlankMask().expose(frames)
+        self.assertEqual(str(caught.exception), NOTHING_FOUND)
+
+    def test_only_this_node_raises_the_token(self):
+        import ast
+
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nodes.py")
+        with open(path, encoding="utf-8") as handle:
+            source = handle.read()
+        (cls,) = [n for n in ast.parse(source).body if isinstance(n, ast.ClassDef) and n.name == "WWAIRefuseBlankMask"]
+        lines = [i for i, line in enumerate(source.splitlines(), 1) if "WWAI_NOTHING_FOUND" in line]
+        self.assertTrue(lines)
+        for line in lines:
+            self.assertTrue(cls.lineno <= line <= cls.end_lineno, f"WWAI_NOTHING_FOUND outside WWAIRefuseBlankMask at line {line}")
 
     def test_is_a_plain_non_output_image_node(self):
         cls = nodes.WWAIRefuseBlankMask
@@ -775,6 +1103,403 @@ class RefuseBlankMaskTest(unittest.TestCase):
         self.assertEqual(cls.RETURN_NAMES, ("images",))
         self.assertEqual(cls.INPUT_TYPES(), {"required": {"images": ("IMAGE",)}})
         self.assertFalse(getattr(cls, "OUTPUT_NODE", False))
+
+
+NOTHING_FOUND = "WWAI_NOTHING_FOUND: Nothing was found, so no mask was made."
+
+SETTINGS = {
+    "prompt_threshold": 0.11, "prompt_max_objects": 7, "prompt_detect_interval": 3,
+    "click_threshold": 0.22, "click_max_objects": 5, "click_detect_interval": 2,
+    "detect_threshold": 0.33, "refine_iterations": 4,
+}
+
+
+def _clip(frame_count, size=4):
+    """A clip whose every pixel holds its frame index (see _Sam3)."""
+    frames = np.zeros((frame_count, size, size, 3), dtype=np.float32)
+    for i in range(frame_count):
+        frames[i] = i
+    return _Tensor(frames)
+
+
+def _keys(keys, frame_range=None):
+    import json
+
+    point = {1: (1, 1), 2: (2, 2), 0: (3, 3)}
+    state = {"source": "a" * 64, "keyframes": [
+        {"frame": f, "object": o, "items": [] if empty else [
+            {"kind": "point", "mode": "include", "x": point[o][0], "y": point[o][1]}]}
+        for f, o, *empty in keys
+    ]}
+    if frame_range:
+        state["range"] = {"in": frame_range[0], "out": frame_range[1]}
+    return json.dumps(state)
+
+
+class _Handle:
+    """A model or clip stand-in (weak-referenceable, as ComfyUI's objects are)."""
+
+    def __init__(self, name):
+        self.name = name
+
+
+MODEL, CLIP = _Handle("sam3-model"), _Handle("sam3-clip")
+
+
+def _track(frames, keyframes, prompt="", model=None, clip=None, keep_cache=False, **settings):
+    if not keep_cache:
+        nodes._LAYER_CACHE.clear()
+    _Sam3.calls.clear()
+    (mask,) = nodes.WWAIRotoTrack().expose(
+        frames=frames, model=model or MODEL, clip=clip or CLIP, keyframes=keyframes, prompt=prompt,
+        **{**SETTINGS, **settings},
+    )
+    return mask
+
+
+def _calls(name):
+    return [kwargs for call, kwargs in _Sam3.calls if call == name]
+
+
+class RotoTrackTest(unittest.TestCase):
+    def tearDown(self):
+        _Sam3.track = None
+
+    def test_shape(self):
+        cls = nodes.WWAIRotoTrack
+        self.assertEqual(cls.RETURN_TYPES, ("IMAGE",))
+        self.assertEqual(cls.RETURN_NAMES, ("mask",))
+        required = cls.INPUT_TYPES()["required"]
+        self.assertEqual(
+            [(k, v[0]) for k, v in list(required.items())[:5]],
+            [("frames", "IMAGE"), ("model", "MODEL"), ("clip", "CLIP"), ("keyframes", "STRING"), ("prompt", "STRING")],
+        )
+        self.assertEqual(list(required)[5:], list(SETTINGS))
+        for name in SETTINGS:
+            self.assertIn(required[name][0], ("FLOAT", "INT"), name)
+            self.assertNotIn("default", required[name][1], name)
+        self.assertNotIn("optional", cls.INPUT_TYPES())
+
+    def test_staggered_keys_each_object_takes_its_nearest_keyframe(self):
+        mask = _track(_clip(150), _keys([(0, 1), (100, 1), (50, 2)], (40, 120)))
+        self.assertEqual(mask.shape, (81, 4, 4, 3))
+        frame_60 = mask[60 - 40]
+        self.assertEqual(frame_60[1, 1, 0], 101)  # object 1 from its key at 100
+        self.assertEqual(frame_60[2, 2, 0], 51)  # object 2 from its key at 50
+        self.assertEqual(mask[50 - 40][1, 1, 0], 1)  # a tie goes to the earlier key (0)
+        self.assertEqual(mask[51 - 40][1, 1, 0], 101)
+
+    def test_steps_match_every_tracked_frames_row(self):
+        import json
+
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "click_cases.json")
+        with open(path, encoding="utf-8") as handle:
+            rows = json.load(handle)["tracked_frames"]
+        for row in rows:
+            with self.subTest(row["name"]):
+                _track(_clip(row["frame_count"]), row["state"], "person" if row["prompt_set"] else "")
+                stepped = sum(call["images"].shape[0] for call in _calls("SAM3_VideoTrack"))
+                # A picture's prompt layer is one SAM3_Detect in place of its one-frame track.
+                stepped += row["frame_count"] == 1 and row["prompt_set"]
+                self.assertEqual(stepped, row["tracked"])
+
+    def test_backward_runs_get_the_frames_reversed(self):
+        _track(_clip(10), _keys([(5, 1)], (2, 5)))
+        (call,) = _calls("SAM3_VideoTrack")
+        self.assertEqual(_Sam3.frames(call["images"]), [5, 4, 3, 2])
+
+    def test_a_blank_prompt_is_never_encoded(self):
+        _track(_clip(10), _keys([(0, 1)]), prompt="   ")
+        self.assertEqual(_calls("CLIPTextEncode"), [])
+        self.assertTrue(all(call.get("conditioning") is None for call in _calls("SAM3_VideoTrack")))
+
+    def test_a_prompt_with_no_object_0_key_tracks_from_frame_0(self):
+        _track(_clip(100), _keys([], (50, 60)), prompt="person")
+        (encode,) = _calls("CLIPTextEncode")
+        self.assertEqual((encode["clip"], encode["text"]), (CLIP, "person"))
+        self.assertEqual(_calls("SAM3_Detect"), [])
+        (call,) = _calls("SAM3_VideoTrack")
+        self.assertEqual(_Sam3.frames(call["images"]), list(range(0, 61)))
+        self.assertIsNone(call["initial_mask"])
+        self.assertIsNotNone(call["conditioning"])
+
+    def test_a_prompt_keyframe_detects_with_the_prompt_and_its_clicks(self):
+        _track(_clip(10), _keys([(4, 0)], (4, 9)), prompt="person")
+        (detect,) = _calls("SAM3_Detect")
+        self.assertEqual(_Sam3.frames(detect["image"]), [4])
+        self.assertIsNotNone(detect["conditioning"])
+        self.assertEqual(detect["positive_coords"], '[{"x": 3, "y": 3}]')
+        (call,) = _calls("SAM3_VideoTrack")
+        self.assertEqual(call["initial_mask"][0][3, 3], 5)  # the detect mask at frame 4
+        self.assertEqual(_Sam3.frames(call["images"]), list(range(4, 10)))
+
+    def test_a_picture_prompt_is_the_old_picture_detect_not_a_track(self):
+        mask = _track(_clip(1), _keys([]), prompt="man:5")
+        (encode,) = _calls("CLIPTextEncode")
+        self.assertEqual(encode["text"], "man:5")  # the encoder reads the count
+        (detect,) = _calls("SAM3_Detect")
+        self.assertIsNotNone(detect["conditioning"])
+        self.assertIsNone(detect["positive_coords"])
+        self.assertEqual((detect["threshold"], detect["refine_iterations"]),
+                         (SETTINGS["detect_threshold"], SETTINGS["refine_iterations"]))
+        self.assertFalse(detect["individual_masks"])
+        self.assertEqual(_calls("SAM3_VideoTrack"), [])
+        self.assertEqual(mask.shape, (1, 4, 4, 3))
+
+    def test_a_picture_prompt_with_clicks_detects_once_with_both(self):
+        mask = _track(_clip(1), _keys([(0, 0), (0, 1)]), prompt="man")
+        detects = _calls("SAM3_Detect")
+        self.assertEqual([d["conditioning"] is not None for d in detects], [True, False])
+        self.assertEqual(detects[0]["positive_coords"], '[{"x": 3, "y": 3}]')
+        self.assertEqual(len(_calls("SAM3_VideoTrack")), 1)  # only the click layer tracks
+        self.assertEqual(mask[0][3, 3, 0], 1)
+
+    def test_a_movie_prompt_still_tracks_every_match(self):
+        _track(_clip(2), _keys([]), prompt="man")
+        self.assertEqual(_calls("SAM3_Detect"), [])
+        (call,) = _calls("SAM3_VideoTrack")
+        self.assertIsNotNone(call["conditioning"])
+
+    def test_each_setting_reaches_its_sam3_call(self):
+        _track(_clip(10), _keys([(0, 0, "empty"), (0, 1)]), prompt="person")
+        detects = _calls("SAM3_Detect")
+        self.assertEqual(len(detects), 2)
+        for call in detects:
+            self.assertEqual((call["threshold"], call["refine_iterations"]), (0.33, 4))
+            self.assertIs(call["individual_masks"], False)
+        prompt_track, click_track = _calls("SAM3_VideoTrack")
+        self.assertIsNotNone(prompt_track["conditioning"])
+        self.assertEqual(
+            (prompt_track["detection_threshold"], prompt_track["max_objects"], prompt_track["detect_interval"]),
+            (0.11, 7, 3),
+        )
+        self.assertIsNone(click_track.get("conditioning"))
+        self.assertEqual(
+            (click_track["detection_threshold"], click_track["max_objects"], click_track["detect_interval"]),
+            (0.22, 5, 2),
+        )
+        for call in _calls("SAM3_VideoTrack") + detects:
+            self.assertIs(call["model"], MODEL)
+
+    def test_a_grammar_refusal_comes_before_any_sam3_work(self):
+        with self.assertRaises(MarkerContractError) as caught:
+            _track(_clip(100), _keys([(55, 1)], (60, 50)))
+        self.assertIn("COMFYUI_CLICKS_INVALID: in_after_out:", str(caught.exception))
+        self.assertEqual(_Sam3.calls, [])
+
+    def test_twenty_objects_and_three_hundred_items_pass(self):
+        import json
+
+        many = json.dumps({"source": "a" * 64, "keyframes": [
+            {"frame": 0, "object": o, "items": [{"kind": "point", "mode": "include", "x": 1, "y": 1}] * (300 if o == 1 else 1)}
+            for o in range(1, 21)
+        ]})
+        mask = _track(_clip(3), many)
+        self.assertEqual(mask.shape[0], 3)
+
+    def test_the_layers_are_unioned(self):
+        mask = _track(_clip(5), _keys([(0, 1), (0, 2)]))
+        self.assertEqual((mask[3][1, 1, 0], mask[3][2, 2, 0]), (1, 1))
+
+    # Nothing found: the tracker never raises it; WWAIRefuseBlankMask after it does.
+
+    def test_a_prompt_that_matches_from_frame_30_passes(self):
+        _Sam3.track = lambda f, data: np.full(data["size"], 1.0 if f >= 30 else 0.0, np.float32)
+        mask = _track(_clip(50), _keys([]), prompt="person")
+        self.assertEqual(float(mask[0].max()), 0.0)
+        (out,) = nodes.WWAIRefuseBlankMask().expose(mask)
+        self.assertIs(out, mask)
+
+    def test_a_click_track_lost_before_in_is_blank_and_then_refused(self):
+        _Sam3.track = lambda f, data: data["init"][0] * (f < 40)
+        mask = _track(_clip(100), _keys([(0, 1)], (50, 60)))
+        self.assertEqual(float(mask.max()), 0.0)
+        with self.assertRaises(MarkerContractError) as caught:
+            nodes.WWAIRefuseBlankMask().expose(mask)
+        self.assertEqual(str(caught.exception), NOTHING_FOUND)
+
+    def test_one_masked_frame_in_the_range_passes(self):
+        _Sam3.track = lambda f, data: data["init"][0] * (f == 55)
+        mask = _track(_clip(100), _keys([(0, 1)], (50, 60)))
+        nodes.WWAIRefuseBlankMask().expose(mask)
+
+
+class RotoLayerCacheTest(unittest.TestCase):
+    """A one-frame click re-runs only what changed: the prompt layer of the
+    same frame, prompt, model, clip and settings is not run again."""
+
+    def setUp(self):
+        self.frames = _clip(100)
+        _track(self.frames, _keys([(80, 0, "empty"), (80, 1)], (80, 80)), prompt="bench")
+
+    def _click(self, frames=None, prompt="bench", **kwargs):
+        keys = _keys([(80, 0, "empty"), (80, 2)], (80, 80))  # the artist clicked elsewhere
+        return _track(frames if frames is not None else self.frames, keys, prompt, keep_cache=True, **kwargs)
+
+    def _prompt_layer_ran(self):
+        return any(call.get("conditioning") is not None for call in _calls("SAM3_VideoTrack"))
+
+    def test_the_same_prompt_layer_is_served_from_the_cache(self):
+        mask = self._click()
+        self.assertFalse(self._prompt_layer_ran())
+        self.assertEqual(_calls("CLIPTextEncode"), [])
+        self.assertEqual(len(_calls("SAM3_Detect")), 1)  # the new click only
+        self.assertEqual(mask[0][2, 2, 0], 81)
+
+    def test_a_changed_prompt_runs_it_again(self):
+        self._click(prompt="chair")
+        self.assertTrue(self._prompt_layer_ran())
+        self.assertEqual(_calls("CLIPTextEncode")[0]["text"], "chair")
+
+    def test_another_model_or_clip_runs_it_again(self):
+        self._click(model=_Handle("other-model"))
+        self.assertTrue(self._prompt_layer_ran())
+        self._click(clip=_Handle("other-clip"))
+        self.assertTrue(self._prompt_layer_ran())
+
+    def test_other_frames_run_it_again(self):
+        self._click(frames=_clip(100))
+        self.assertTrue(self._prompt_layer_ran())
+
+    def test_a_changed_setting_runs_it_again(self):
+        for name, value in (("prompt_threshold", 0.9), ("prompt_max_objects", 1),
+                            ("prompt_detect_interval", 9), ("detect_threshold", 0.9), ("refine_iterations", 1)):
+            with self.subTest(name):
+                self._click(**{name: value})
+                self.assertTrue(self._prompt_layer_ran())
+
+    def test_a_cached_mask_holds_only_its_own_frame(self):
+        nodes._LAYER_CACHE.clear()
+        _track(self.frames, _keys([(0, 1)], (6, 6)), keep_cache=True)  # tracked over 7 frames
+        for _, layer in nodes._LAYER_CACHE.values():
+            for mask in layer.values():
+                self.assertEqual(mask.untyped_storage().nbytes(), mask.nbytes)
+
+    def test_a_multi_frame_run_is_never_cached(self):
+        keys = _keys([(80, 0, "empty")], (78, 80))
+        _track(self.frames, keys, "bench", keep_cache=True)
+        _track(self.frames, keys, "bench", keep_cache=True)
+        self.assertTrue(self._prompt_layer_ran())
+
+    def test_the_cache_is_bounded(self):
+        for frame in range(nodes._LAYER_CACHE_SIZE + 3):
+            _track(self.frames, _keys([(frame, 1)], (frame, frame)), keep_cache=True)
+        self.assertEqual(len(nodes._LAYER_CACHE), nodes._LAYER_CACHE_SIZE)
+
+
+class ExposeKeyframesTest(unittest.TestCase):
+    def test_shape(self):
+        cls = nodes.WWAIExposeKeyframes
+        self.assertEqual(cls.RETURN_TYPES, ("STRING",))
+        self.assertEqual(cls.RETURN_NAMES, ("keyframes",))
+        self.assertEqual(list(cls.INPUT_TYPES()["required"]), ["value", "name", "description", "required"])
+
+    def test_passes_the_text_and_refuses_malformed_text(self):
+        text = _keys([(0, 1)])
+        self.assertEqual(nodes.WWAIExposeKeyframes().expose(text, "clicks", "", True), (text,))
+        with self.assertRaises(MarkerContractError) as caught:
+            nodes.WWAIExposeKeyframes().expose("{", "clicks", "", True)
+        self.assertIn("COMFYUI_CLICKS_INVALID: malformed:", str(caught.exception))
+        with self.assertRaises(MarkerContractError):
+            nodes.WWAIExposeKeyframes().expose(text, " ", "", True)
+
+
+class ImageOrVideoTest(unittest.TestCase):
+    def test_shape(self):
+        cls = nodes.WWAIExposeImageOrVideo
+        self.assertEqual(cls.RETURN_TYPES, ("IMAGE", "WWAI_MEDIA_INFO"))
+        self.assertEqual(cls.RETURN_NAMES, ("images", "media_info"))
+        self.assertIn("file", cls.INPUT_TYPES()["required"])
+        out = nodes.WWAIExposeOutputImageOrVideo.INPUT_TYPES()
+        self.assertEqual(list(out["required"]), ["images", "media_info", "name", "description"])
+        self.assertEqual(out["required"]["media_info"], ("WWAI_MEDIA_INFO",))
+
+    def test_a_picture_gives_what_expose_image_gives(self):
+        images, info = nodes.WWAIExposeImageOrVideo().expose("shot.png", "src", "", True)
+        image, _ = nodes.WWAIExposeImage().expose("shot.png", "src", "", True)
+        np.testing.assert_array_equal(images, image)
+        self.assertEqual(info, {"kind": "image", "fps": None})
+
+    def test_a_movie_gives_what_expose_video_gives(self):
+        images, info = nodes.WWAIExposeImageOrVideo().expose("clip.mp4", "src", "", True)
+        _, frames, _, fps = nodes.WWAIExposeVideo().expose("clip.mp4", "src", "", True)
+        np.testing.assert_array_equal(images, frames)
+        self.assertEqual(info, {"kind": "video", "fps": Fraction(24, 1)})
+        self.assertEqual(float(info["fps"]), fps)
+
+    def test_an_mxf_movie_is_a_movie_for_both_inputs(self):
+        images, info = nodes.WWAIExposeImageOrVideo().expose("clip.mxf", "src", "", True)
+        self.assertEqual(info["kind"], "video")
+        nodes.WWAIExposeVideo().expose("clip.mxf", "src", "", True)
+
+    def test_a_movie_with_no_frame_rate_is_refused_by_both_inputs(self):
+        from unittest import mock
+
+        class _NoRate:
+            streams = types.SimpleNamespace(video=[types.SimpleNamespace(average_rate=None)])
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        with mock.patch.object(nodes.av, "open", lambda path: _NoRate()):
+            for node in (nodes.WWAIExposeImageOrVideo(), nodes.WWAIExposeVideo()):
+                with self.assertRaises(MarkerContractError) as caught:
+                    node.expose("clip.mp4", "src", "", True)
+                self.assertIn("WWAI_VIDEO_NO_FRAME_RATE", str(caught.exception), type(node).__name__)
+
+    def test_a_file_that_is_neither_is_refused(self):
+        with self.assertRaises(MarkerContractError):
+            nodes.WWAIExposeImageOrVideo().expose("track.flac", "src", "", True)
+
+    def test_staged_file_refusal_is_shared(self):
+        import hashlib
+
+        os.makedirs(os.path.join(_IN, "wwai"), exist_ok=True)
+        rel = f"wwai/wwai-{hashlib.sha256(b'abc').hexdigest()}.mp4"
+        with open(os.path.join(_IN, rel), "wb") as handle:
+            handle.write(b"not-abc")
+        with self.assertRaises(MarkerContractError) as caught:
+            nodes.WWAIExposeImageOrVideo().expose(rel, "src", "", True)
+        self.assertIn("WWAI_STAGED_FILE_UNUSABLE", str(caught.exception))
+
+    def test_output_writes_a_png_for_a_picture(self):
+        _, info = nodes.WWAIExposeImageOrVideo().expose("shot.png", "src", "", True)
+        result = nodes.WWAIExposeOutputImageOrVideo().expose(
+            images=_Tensor(np.zeros((1, 4, 4, 3), dtype=np.float32)), media_info=info, name="mask", description=""
+        )
+        entry = result["ui"]["wwai_result"][0]
+        self.assertTrue(entry["filename"].endswith(".png"))
+        with Image.open(_written(entry)) as img:
+            self.assertEqual(img.format, "PNG")
+
+    def test_output_writes_an_mp4_at_the_input_fps(self):
+        info = {"kind": "video", "fps": Fraction(15, 1)}
+        captured = {}
+        real = nodes.InputImpl.VideoFromComponents
+
+        def spy(components, **kwargs):
+            captured["fps"] = components.frame_rate
+            return real(components, **kwargs)
+
+        nodes.InputImpl.VideoFromComponents = spy
+        try:
+            result = nodes.WWAIExposeOutputImageOrVideo().expose(
+                images=_Tensor(np.zeros((3, 4, 4, 3), dtype=np.float32)), media_info=info, name="mask", description=""
+            )
+        finally:
+            nodes.InputImpl.VideoFromComponents = real
+        self.assertTrue(result["ui"]["wwai_result"][0]["filename"].endswith(".mp4"))
+        self.assertEqual(captured["fps"], Fraction(15, 1))
+
+    def test_output_refuses_a_blank_name(self):
+        with self.assertRaises(MarkerContractError):
+            nodes.WWAIExposeOutputImageOrVideo().expose(
+                images=_Tensor(np.zeros((1, 4, 4, 3), dtype=np.float32)),
+                media_info={"kind": "image", "fps": None}, name="", description="",
+            )
 
 
 class StagedFileUseTest(unittest.TestCase):
@@ -817,7 +1542,7 @@ class OutputMarkerCachingTest(unittest.TestCase):
         import math
 
         outputs = [cls for cls in nodes.NODE_CLASS_MAPPINGS.values() if getattr(cls, "OUTPUT_NODE", False)]
-        self.assertEqual(len(outputs), 4)
+        self.assertEqual(len(outputs), 6)
         for cls in outputs:
             first = cls.IS_CHANGED(value=None, name="n", description="")
             self.assertTrue(math.isnan(first), cls.__name__)
@@ -883,6 +1608,254 @@ class StagedFilesRouteTest(unittest.TestCase):
             self._post(f"wwai-{self.HEX}.png"),
             (500, {"wwai_staged_file": "failed", "detail": "cannot read the prompt queue: queue locked"}),
         )
+
+
+class RetiredNamesTest(unittest.TestCase):
+    """The one-frame click format is retired (WWAI plan 2410): its names stay out of the tracked source."""
+
+    def test_retired_names_are_gone(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        names = ("WWAIExpose" + "Clicks", "split" + "_clicks")  # split so this file does not match itself
+        for root, dirs, files in os.walk(here):
+            dirs[:] = [d for d in dirs if d not in (".git", "__pycache__")]
+            for f in files:
+                if f.endswith((".py", ".md", ".json")):
+                    with open(os.path.join(root, f), encoding="utf-8") as fh:
+                        text = fh.read()
+                    for n in names:
+                        self.assertNotIn(n, text, f"{n} in {f}")
+
+
+def _gray(index):
+    """The grey level source frame *index* of a Ripple test movie is painted (30 levels, then again)."""
+    return 16 + 8 * (index % 30)
+
+
+def _ripple_movie(path, rate=24, frames=30, first=0, audio_from=None):
+    """A real .mov whose frame i is flat grey _gray(i) and whose pts start *first* frames
+    in, plus (with *audio_from*, in seconds) a mono 8 kHz track silent until then and
+    at a quarter of full scale after it."""
+    with av.open(path, "w", format="mov") as container:
+        video = container.add_stream("mpeg4", rate=rate)
+        video.width, video.height, video.pix_fmt = 64, 36, "yuv420p"
+        sound = container.add_stream("pcm_s16le", rate=8000, layout="mono") if audio_from is not None else None
+        for i in range(frames):
+            frame = av.VideoFrame.from_ndarray(np.full((36, 64, 3), _gray(i), np.uint8), format="rgb24")
+            frame.pts = first + i
+            for packet in video.encode(frame):
+                container.mux(packet)
+        for packet in video.encode():
+            container.mux(packet)
+        if sound is not None:
+            total = round(frames / Fraction(rate) * 8000)
+            level = np.where(np.arange(total) >= audio_from * 8000, 8192, 0).astype(np.int16)
+            for begin in range(0, total, 800):
+                chunk = av.AudioFrame.from_ndarray(level[None, begin : begin + 800], format="s16", layout="mono")
+                chunk.sample_rate, chunk.pts = 8000, begin
+                for packet in sound.encode(chunk):
+                    container.mux(packet)
+            for packet in sound.encode():
+                container.mux(packet)
+
+
+def _movie_stamps(path):
+    """(time base, sorted played pts, end pts, first decoded pts) as the movie is stored."""
+    with av.open(path) as container:
+        stream = container.streams.video[0]
+        time_base = stream.time_base
+        packets = [p for p in container.demux(stream) if p.size]
+        last = max(packets, key=lambda p: p.pts)
+    with av.open(path) as container:
+        first = next(container.decode(video=0)).pts
+    return time_base, sorted(p.pts for p in packets), last.pts + last.duration, first
+
+
+def _source_index(picture):
+    return int(np.argmin([abs(float(np.mean(picture)) * 255 - _gray(i)) for i in range(30)]))
+
+
+class RippleJobTest(unittest.TestCase):
+    """WWAIExposeRippleJob v2: checks every file, re-derives the 24 fps grid from the
+    ORIGINAL movie, refuses a disagreement with WWAI's reading by name, and cuts only
+    the window, in memory."""
+
+    @staticmethod
+    def _stage(write, ext):
+        scratch = os.path.join(_IN, "ripple-scratch." + ext)
+        write(scratch)
+        with open(scratch, "rb") as handle:
+            digest = hashlib.sha256(handle.read()).hexdigest()
+        os.makedirs(os.path.join(_IN, "wwai"), exist_ok=True)
+        name = f"wwai/wwai-{digest}.{ext}"
+        os.replace(scratch, os.path.join(_IN, name))
+        return name
+
+    def _movie(self, **movie):
+        video = self._stage(lambda path: _ripple_movie(path, **movie), "mov")
+        return video, _movie_stamps(os.path.join(_IN, video))
+
+    def _job(self, video, stamps, window_start=3, length=22, edits=((2, 5),), edit_bytes=None, **changes):
+        """A v2 job text; *edits* are (window frame, index of the played packet whose pts it carries)."""
+        time_base, pts, _end, _first = stamps
+        if edit_bytes is None:
+            edit = self._stage(lambda path: Image.new("RGB", (4, 4), (9, 9, 9)).save(path), "png")
+        else:
+            edit = self._stage(lambda path: pathlib.Path(path).write_bytes(edit_bytes), "png")
+        job = {
+            "version": 2, "video": video, "time_base": f"{time_base.numerator}/{time_base.denominator}",
+            "window_start": window_start, "length": length, "decode_width": 32, "decode_height": 18,
+            "megapixels": 0.25, "allow_upscale": False, "resize_method": "lanczos", "output_width": 0, "output_height": 0,
+            "markers": [{"frame": frame, "pts": pts[index], "edited": edit} for frame, index in edits],
+        }
+        job.update(changes)
+        return json.dumps(job)
+
+    def _run(self, text):
+        return nodes.WWAIExposeRippleJob().expose(value=text, name="job", description="", required=True)
+
+    def test_a_good_job_feeds_from_frames_exactly_its_window(self):
+        video, stamps = self._movie()
+        text = self._job(video, stamps)
+        edit = json.loads(text)["markers"][0]["edited"]
+        images, audio, rate, duration, mp, start, markers, upscale, method, width, height = self._run(text)
+        self.assertEqual(images.shape, (22, 18, 32, 3))
+        self.assertEqual([_source_index(picture) for picture in images], list(range(3, 25)))
+        self.assertIsNone(audio)  # no sound track in this movie
+        self.assertEqual((rate, duration, mp, start, upscale, method, width, height), (24.0, 22 / 24, 0.25, 0, False, "lanczos", 0, 0))
+        self.assertEqual(json.loads(markers), [{"id": 1, "frame": 2, "edited": edit, "edited_at": 2}])
+        self.assertEqual(len(nodes.WWAIExposeRippleJob.RETURN_TYPES), len(nodes.WWAIExposeRippleJob.RETURN_NAMES))
+
+    def test_a_30_fps_movie_with_a_late_start_shows_the_frames_the_rule_names(self):
+        video, stamps = self._movie(rate=30, frames=30, first=3)
+        time_base, pts, end, first = stamps
+        self.assertEqual(first, pts[0])  # mpeg4 has no reordering: the first packet decodes first
+        slots = nodes.ripple_grid_slots(pts, first, end, time_base)
+        # window frame 2 is grid frame 5, which shows the 7th source frame (30 fps skips 1 in 5)
+        images = self._run(self._job(video, stamps, window_start=3, length=5, edits=((2, pts.index(slots[5])),)))[0]
+        self.assertEqual([_source_index(picture) for picture in images], [pts.index(p) for p in slots[3:8]])
+        self.assertEqual([pts.index(p) for p in slots[3:8]], [4, 5, 6, 8, 9])  # source frame 7 is skipped
+
+    def test_the_rule_matches_ffmpegs_own_24_fps_conversion(self):
+        """The open fact of plan 2418: this machine's FFmpeg resamples to 24 fps exactly as
+        the rule says (the fps filter, round=near, from the first decoded frame)."""
+        for rate, first in ((Fraction(24000, 1001), 0), (25, 1), (30, 3), (12, 0)):
+            with self.subTest(rate=rate, first=first):
+                path = os.path.join(_IN, "ripple-oracle.mov")
+                _ripple_movie(path, rate=rate, frames=30, first=first)
+                time_base, pts, end, p0 = _movie_stamps(path)
+                slots = nodes.ripple_grid_slots(pts, p0, end, time_base)
+                shown = []
+                with av.open(path) as container:
+                    graph = None
+                    for frame in itertools.chain(container.decode(video=0), (None,)):
+                        if graph is None:
+                            graph = av.filter.Graph()
+                            graph.link_nodes(
+                                graph.add_buffer(width=frame.width, height=frame.height, format=frame.format, time_base=frame.time_base),
+                                graph.add("setpts", f"PTS-{p0}"),
+                                graph.add("fps", "fps=24:start_time=0:round=near"),
+                                graph.add("buffersink"),
+                            )
+                            graph.configure()
+                        graph.push(frame)
+                        while True:
+                            try:
+                                out = graph.pull()
+                            except (av.error.BlockingIOError, av.error.EOFError):
+                                break
+                            shown.append(_source_index(out.to_ndarray(format="rgb24") / 255.0))
+                rule = [pts.index(p) for p in slots]
+                self.assertEqual(shown[: len(rule)], rule)
+                self.assertLessEqual(len(shown) - len(rule), 1, (shown, rule))  # EOF may pad one frame
+
+    def test_the_sound_is_cut_to_the_window(self):
+        video, stamps = self._movie(frames=60, audio_from=1)
+        late = self._run(self._job(video, stamps, window_start=24, edits=((0, 24),)))[1]
+        early = self._run(self._job(video, stamps, window_start=0, edits=((0, 0),)))[1]
+        for audio in (late, early):
+            self.assertEqual((audio["sample_rate"], audio["waveform"].shape), (8000, (1, 1, round(22 / 24 * 8000))))
+        self.assertTrue(np.allclose(np.asarray(late["waveform"]), 0.25, atol=1e-3))
+        self.assertTrue(np.allclose(np.asarray(early["waveform"]), 0.0))
+
+    def _refused(self, text, pattern):
+        with self.assertRaisesRegex(MarkerContractError, pattern):
+            self._run(text)
+
+    def test_an_edit_whose_pts_lands_on_another_frame_is_refused(self):
+        video, stamps = self._movie()
+        self._refused(self._job(video, stamps, edits=((2, 6),)), r"^WWAI_RIPPLE_WINDOW_MISMATCH: .*pts .* at grid frame 6, not at grid frame 5")
+
+    def test_an_edit_on_a_frame_the_grid_skips_is_refused(self):
+        video, stamps = self._movie(rate=30, frames=30)
+        _tb, pts, end, first = stamps
+        slots = nodes.ripple_grid_slots(pts, first, end, _tb)
+        skipped = next(i for i, p in enumerate(pts) if p not in slots)
+        self._refused(self._job(video, stamps, window_start=0, length=5, edits=((2, skipped),)), r"^WWAI_RIPPLE_WINDOW_MISMATCH: .*on no grid frame")
+
+    def test_an_edit_whose_pts_is_no_frame_of_the_movie_is_refused(self):
+        video, stamps = self._movie()
+        text = json.loads(self._job(video, stamps))
+        text["markers"][0]["pts"] += 1
+        self._refused(json.dumps(text), r"^WWAI_RIPPLE_WINDOW_MISMATCH: no frame of the movie has pts")
+
+    def test_another_time_base_is_refused(self):
+        video, stamps = self._movie()
+        self._refused(self._job(video, stamps, time_base="1/90000"), r"^WWAI_RIPPLE_WINDOW_MISMATCH: the movie's time base")
+
+    def test_a_window_past_the_shot_is_refused(self):
+        video, stamps = self._movie(frames=30)
+        self._refused(self._job(video, stamps, window_start=9, edits=((0, 9),)), r"^WWAI_RIPPLE_WINDOW_MISMATCH: the window ends at grid frame 31, the movie has 30")
+
+    def test_the_window_it_cuts_is_the_size_wwai_charges(self):
+        """The decoded half of WWAI's window_bytes (ripple_cases.json "window_bytes", the same
+        rows its test_ripple_job.py checks): the picture tensor plus the sound window, in bytes."""
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "ripple_cases.json"), encoding="utf-8") as handle:
+            rows = json.load(handle)["window_bytes"]
+        for row in rows:
+            if not row["gpu_check"]:
+                continue
+            with self.subTest(row["name"]):
+                self.assertIn(row["audio_rate"], (0, 8000))  # _ripple_movie writes 8 kHz mono
+                video, stamps = self._movie(audio_from=0.1 if row["audio_rate"] else None)
+                text = self._job(
+                    video, stamps, length=row["length"], decode_width=row["decode_width"],
+                    decode_height=row["decode_height"], megapixels=row["megapixels"],
+                )
+                images, audio = self._run(text)[:2]
+                got = images.nbytes
+                if audio is not None:
+                    got += audio["waveform"].nbytes
+                self.assertEqual(got, row["window_decoded_bytes"])
+
+    def test_a_decode_size_larger_than_the_movie_is_refused(self):
+        video, stamps = self._movie()
+        self._refused(self._job(video, stamps, decode_width=65), r"^WWAI_RIPPLE_WINDOW_MISMATCH: the job decodes at 65x18")
+
+    def test_a_file_that_is_no_movie_is_refused(self):
+        video = self._stage(lambda path: pathlib.Path(path).write_bytes(b"not a movie at all"), "mov")
+        stamps = (Fraction(1, 12288), list(range(0, 30 * 512, 512)), 0, 0)
+        self._refused(self._job(video, stamps), r"^WWAI_RIPPLE_VIDEO_UNUSABLE: the movie cannot be read")
+
+    def test_an_edit_that_does_not_load_is_refused(self):
+        video, stamps = self._movie()
+        self._refused(self._job(video, stamps, edit_bytes=b"\x89PNG\r\n\x1a\n" + b"x" * 8), "WWAI_RIPPLE_EDIT_UNUSABLE")
+
+    def test_a_damaged_staged_copy_raises_the_restage_text(self):
+        video, stamps = self._movie()
+        text = self._job(video, stamps)
+        with open(os.path.join(_IN, video), "ab") as handle:
+            handle.write(b"junk")
+        self._refused(text, "WWAI_STAGED_FILE_UNUSABLE")
+
+    def test_a_version_1_job_is_refused_before_any_file_is_read(self):
+        v1 = {
+            "version": 1, "clip": f"wwai/wwai-{'a' * 64}.mp4", "length": 5, "megapixels": 0.25, "allow_upscale": False,
+            "resize_method": "lanczos", "output_width": 0, "output_height": 0,
+            "markers": [{"frame": 2, "edited": f"wwai/wwai-{'b' * 64}.png"}],
+        }
+        self._refused(json.dumps(v1), "^WWAI_RIPPLE_JOB_INVALID")
+        self._refused("{}", "^WWAI_RIPPLE_JOB_INVALID")
+
 
 if __name__ == "__main__":
     unittest.main()
