@@ -988,6 +988,19 @@ class PathNodesTest(unittest.TestCase):
                 with self.assertRaisesRegex(MarkerContractError, "^" + token):
                     load.expose(path)
 
+    def test_load_refuses_a_sequence_with_a_missing_frame(self):
+        for n in (1001, 1002, 1004):
+            Image.new("RGB", (6, 4)).save(f"{self.root}/show/g.{n}.png")
+        with self.assertRaisesRegex(MarkerContractError, "^WWAI_SEQUENCE_GAP: .*frame 1003 is missing"):
+            nodes.WWAILoadFromPath().expose(f"{self.root}/show/g.%04d.png")
+
+    def test_save_refuses_old_frames_outside_the_new_range_and_keeps_them(self):
+        nodes.WWAISaveToPath().expose(self.batch(), self.pattern, 1001, "16-bit")
+        before = sorted(os.listdir(f"{self.root}/show"))
+        with self.assertRaisesRegex(MarkerContractError, "^WWAI_STALE_FRAMES: .*first is 1002"):
+            nodes.WWAISaveToPath().expose(self.batch(1), self.pattern, 1001, "16-bit")
+        self.assertEqual(sorted(os.listdir(f"{self.root}/show")), before)
+
     def test_load_refuses_frames_of_different_size(self):
         Image.new("RGB", (6, 4)).save(f"{self.root}/show/m.0001.png")
         Image.new("RGB", (8, 4)).save(f"{self.root}/show/m.0002.png")

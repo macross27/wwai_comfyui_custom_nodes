@@ -146,25 +146,54 @@ def frame_pattern(path):
     return directory, base[: token.start()], int(token.group(1)), base[token.end() :]
 
 
-def sequence_frames(path, class_name):
-    """Sorted ``[(frame_number, full_path)]`` of the files a pattern path names.
-
-    Only files with exactly the pattern's digit count match, so ``plate.10000.png``
-    is not frame 10000 of a ``%04d`` sequence.
-    """
-    pattern = frame_pattern(path)
-    if pattern is None:
-        _refuse_path(class_name, "source path", path, "has no frame-number token such as %04d")
-    directory, prefix, width, suffix = pattern
+def _listed_frames(path):
+    directory, prefix, width, suffix = frame_pattern(path)
     name = re.compile(re.escape(prefix) + f"([0-9]{{{width}}})" + re.escape(suffix))
     frames = []
     for entry in os.listdir(directory):
         match = name.fullmatch(entry)
         if match:
             frames.append((int(match.group(1)), f"{directory}/{entry}"))
+    return sorted(frames)
+
+
+def sequence_frames(path, class_name):
+    """Sorted ``[(frame_number, full_path)]`` of the files a pattern path names.
+
+    Only files with exactly the pattern's digit count match, so ``plate.10000.png``
+    is not frame 10000 of a ``%04d`` sequence. A listing: gaps are not checked here.
+    """
+    if frame_pattern(path) is None:
+        _refuse_path(class_name, "source path", path, "has no frame-number token such as %04d")
+    frames = _listed_frames(path)
     if not frames:
         raise MarkerContractError(f"WWAI_SEQUENCE_EMPTY: {class_name}: no frames match {path!r}")
-    return sorted(frames)
+    return frames
+
+
+def require_contiguous(frames, path, class_name):
+    """Refuse a sequence with a missing frame number: closing the gap would shift every later frame."""
+    for (number, _), (following, _) in zip(frames, frames[1:]):
+        if following != number + 1:
+            raise MarkerContractError(
+                f"WWAI_SEQUENCE_GAP: {class_name}: frame {number + 1} is missing from {path!r} "
+                f"(frames {number} and {following} are present)"
+            )
+    return frames
+
+
+def refuse_stale_frames(path, first, last, class_name):
+    """Refuse when frames already matching ``path`` lie outside ``first``-``last``.
+
+    Overwriting inside the range is allowed; a returned pattern must never match
+    a frame this run did not write. Nothing is deleted.
+    """
+    stale = [n for n, _ in _listed_frames(path) if not first <= n <= last]
+    if stale:
+        raise MarkerContractError(
+            f"WWAI_STALE_FRAMES: {class_name}: {len(stale)} frames outside {first}-{last} already match "
+            f"{path!r} (first is {stale[0]}); remove them or choose another output path"
+        )
 
 
 def write_in_place(final_path, write):
@@ -175,16 +204,44 @@ def write_in_place(final_path, write):
     raises. The folder is never created (a missing one fails loud), and an
     existing file is overwritten: the artist owns the output path.
     """
-    directory, base = os.path.split(final_path)
-    temp_path = os.path.join(directory, f".{base}.wwai-tmp-{uuid.uuid4().hex}")
+    write_all_in_place([(final_path, write)])
+    return final_path
+
+
+def write_all_in_place(items):
+    """``items`` is ``[(final_path, write)]``. Write every temp first, then rename in order.
+
+    A failed temp write removes all temps and replaces nothing. A failed rename
+    removes the remaining temps and says how many files were already replaced.
+    """
+    temps = []
     try:
-        write(temp_path)
-        os.replace(temp_path, final_path)
+        for final_path, write in items:
+            directory, base = os.path.split(final_path)
+            temp_path = os.path.join(directory, f".{base}.wwai-tmp-{uuid.uuid4().hex}")
+            temps.append(temp_path)
+            write(temp_path)
     except BaseException:
+        _remove_temps(temps)
+        raise
+    for done, ((final_path, _), temp_path) in enumerate(zip(items, temps)):
+        try:
+            os.replace(temp_path, final_path)
+        except BaseException as exc:
+            _remove_temps(temps[done:])
+            if done == 0:
+                raise
+            raise MarkerContractError(
+                f"WWAI_PARTIAL_WRITE: {done} of {len(items)} frames were replaced before {final_path!r} "
+                f"failed ({exc}); the folder now mixes new and old frames"
+            ) from exc
+    return [final_path for final_path, _ in items]
+
+
+def _remove_temps(temps):
+    for temp_path in temps:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(temp_path)
-        raise
-    return final_path
 
 
 # Name grammars shared with WWAI's backend (a sibling-checkout test compares

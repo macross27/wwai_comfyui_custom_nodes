@@ -25,7 +25,10 @@ from wwai_markers_core import (
     require_marker_name,
     require_single,
     require_storage_path,
+    refuse_stale_frames,
+    require_contiguous,
     sequence_frames,
+    write_all_in_place,
     write_in_place,
     check_keyframes,
     parse_keyframes,
@@ -748,6 +751,29 @@ class SequenceFramesTest(unittest.TestCase):
         frames = sequence_frames(f"{self.dir}/p.%04d.png", "Cls")
         self.assertEqual(frames, [(2, f"{self.dir}/p.0002.png"), (10, f"{self.dir}/p.0010.png")])
 
+    def test_a_gap_is_refused_naming_the_first_missing_frame(self):
+        self.touch("p.1001.png", "p.1002.png", "p.1004.png")
+        frames = sequence_frames(f"{self.dir}/p.%04d.png", "Cls")
+        with self.assertRaisesRegex(MarkerContractError, "^WWAI_SEQUENCE_GAP: Cls: frame 1003 is missing"):
+            require_contiguous(frames, f"{self.dir}/p.%04d.png", "Cls")
+
+    def test_a_contiguous_run_and_a_single_frame_pass(self):
+        self.touch("p.0005.png", "p.0006.png", "p.0007.png")
+        frames = sequence_frames(f"{self.dir}/p.%04d.png", "Cls")
+        self.assertEqual(require_contiguous(frames, "x", "Cls"), frames)
+        self.assertEqual(require_contiguous(frames[:1], "x", "Cls"), frames[:1])
+
+    def test_stale_frames_outside_the_written_range_are_refused_and_kept(self):
+        self.touch(*(f"p.{n:04d}.png" for n in range(1001, 1011)))
+        with self.assertRaisesRegex(MarkerContractError, r"^WWAI_STALE_FRAMES: Cls: 4 frames outside 1001-1006 .*first is 1007"):
+            refuse_stale_frames(f"{self.dir}/p.%04d.png", 1001, 1006, "Cls")
+        self.assertEqual(len(os.listdir(self.dir)), 10)
+
+    def test_frames_inside_the_range_or_none_at_all_pass(self):
+        self.touch("p.1001.png", "p.1002.png")
+        refuse_stale_frames(f"{self.dir}/p.%04d.png", 1001, 1006, "Cls")
+        refuse_stale_frames(f"{self.dir}/q.%04d.png", 1, 3, "Cls")
+
     def test_no_match_is_refused(self):
         self.touch("other.png")
         with self.assertRaisesRegex(MarkerContractError, "^WWAI_SEQUENCE_EMPTY: Cls"):
@@ -799,6 +825,43 @@ class WriteInPlaceTest(unittest.TestCase):
             with self.assertRaisesRegex(OSError, "rename refused"):
                 write_in_place(self.final, self.put(b"data"))
         self.assertEqual(os.listdir(self.dir), [])
+
+    def items(self, count):
+        return [(os.path.join(self.dir, f"s.{n}.png"), self.put(b"new%d" % n)) for n in range(count)]
+
+    def test_all_frames_are_written_and_returned_in_order(self):
+        items = self.items(3)
+        self.assertEqual(write_all_in_place(items), [p for p, _ in items])
+        self.assertEqual(len(os.listdir(self.dir)), 3)
+
+    def test_a_failing_temp_write_mid_sequence_replaces_nothing(self):
+        items = self.items(3)
+        write_in_place(items[0][0], self.put(b"old"))
+
+        def broken(temp_path):
+            raise OSError("disk full")
+
+        items[2] = (items[2][0], broken)
+        with self.assertRaisesRegex(OSError, "disk full"):
+            write_all_in_place(items)
+        self.assertEqual(os.listdir(self.dir), ["s.0.png"])
+        with open(items[0][0], "rb") as handle:
+            self.assertEqual(handle.read(), b"old")
+
+    def test_a_failing_rename_mid_sequence_says_how_many_were_replaced(self):
+        real = os.replace
+        calls = []
+
+        def flaky(src, dst):
+            calls.append(dst)
+            if len(calls) == 3:
+                raise OSError("rename refused")
+            real(src, dst)
+
+        with mock.patch.object(os, "replace", side_effect=flaky):
+            with self.assertRaisesRegex(MarkerContractError, r"^WWAI_PARTIAL_WRITE: 2 of 4 frames were replaced"):
+                write_all_in_place(self.items(4))
+        self.assertEqual(sorted(os.listdir(self.dir)), ["s.0.png", "s.1.png"])
 
     def test_a_missing_output_folder_fails_loud_and_is_not_created(self):
         missing = os.path.join(self.dir, "nope", "out.png")

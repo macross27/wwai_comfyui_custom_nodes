@@ -56,6 +56,9 @@ from .wwai_markers_core import (
     sequence_frames,
     split_items,
     unannotated,
+    refuse_stale_frames,
+    require_contiguous,
+    write_all_in_place,
     write_in_place,
 )
 
@@ -1365,7 +1368,7 @@ def _load_png_sequence(path, class_name):
     """(frames, first frame number) of a ``name.%04d.png`` sequence, as RGB float32 in [0, 1]."""
     if not path.lower().endswith(".png"):
         raise MarkerContractError(f"WWAI_PATH_REFUSED: {class_name}: source path {path!r} is not a .png sequence")
-    frames = sequence_frames(path, class_name)
+    frames = require_contiguous(sequence_frames(path, class_name), path, class_name)
     arrays = []
     for number, frame_path in frames:
         with Image.open(frame_path) as img:
@@ -1494,9 +1497,13 @@ class WWAISaveToPath(AlwaysRerunMixin):
                 f"WWAI_PATH_REFUSED: {class_name}: output path {path!r} cannot hold frame {last} "
                 f"in {width} digits, and a reader would not find it"
             )
-        for offset, image in enumerate(frames):
-            number = str(first_frame + offset).zfill(width)
-            write_in_place(f"{directory}/{prefix}{number}{suffix}", writer(image))
+        refuse_stale_frames(path, first_frame, last, class_name)
+        write_all_in_place(
+            [
+                (f"{directory}/{prefix}{str(first_frame + offset).zfill(width)}{suffix}", writer(image))
+                for offset, image in enumerate(frames)
+            ]
+        )
         return (path,)
 
 
